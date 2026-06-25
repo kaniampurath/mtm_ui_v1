@@ -1,0 +1,13 @@
+﻿{
+  "name": "mtm-ui-pilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Isolated Deepvue-inspired modular workspace pilot for MyTradingMind.ai.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

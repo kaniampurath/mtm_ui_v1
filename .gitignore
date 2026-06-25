@@ -1,0 +1,27 @@
+﻿# Runtime secrets / local launch files
+run-mtm-ui.bat
+.env
+.env.*
+!.env.example
+
+# Local config and caches
+config/*.local.json
+pipeline.log
+*.log
+
+# Generated QA/report artifacts
+data/*.json
+
+# Python/Node generated files
+__pycache__/
+*.py[cod]
+node_modules/
+dist/
+build/
+coverage/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

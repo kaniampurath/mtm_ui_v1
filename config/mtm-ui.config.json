@@ -1,0 +1,33 @@
+﻿{
+    "server":  {
+                   "host":  "127.0.0.1",
+                   "port":  4173
+               },
+    "database":  {
+                     "client":  "mysql",
+                     "name":  "myts",
+                     "user":  "tradeuser",
+                     "ssl":  false,
+                     "stateTable":  "mtm_ui_workspace_state"
+                 },
+    "eodhd":  {
+                  "apiToken":  ""
+              },
+    "auth":  {
+                 "adminUsername":  "admin",
+                 "defaultAdminPasswordEnv":  "MTM_DEFAULT_ADMIN_PASSWORD",
+                 "forcePasswordChangeOnFirstLogin":  true,
+                 "minPasswordLength":  10
+             },
+    "cache":  {
+                  "redisEnabled":  true,
+                  "redisUrl":  "redis://127.0.0.1:6379/0",
+                  "dailyRsDays":  260,
+                  "dailyRsTtlSeconds":  21600
+              },
+    "marketCycle":  {
+                  "outputRoot":  "bear_market_analysis/output",
+                  "trackerDir":  "bear_cycle_tracker",
+                  "backtestDir":  "index_cycle_backtest"
+              }
+}
