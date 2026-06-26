@@ -209,6 +209,70 @@ function liveEventSnapshot(session) {
     streams: ["heartbeat", "workspace", "market_cache", "rs_daily", "signals", "bots"]
   };
 }
+
+async function setupStatusModel() {
+  const checks = [];
+  const add = (area, name, status, detail = "", action = "") => checks.push({ area, name, status, detail, action });
+  add("Runtime", "Node server", "green", `Listening on ${host}:${port}`, "Use run-mtm-ui.bat or run-mtm-ui.sh to restart.");
+  add("Config", "Portable config", config.server || config.database ? "green" : "amber", "config/mtm-ui.config.json loaded with OS-neutral settings.", "Keep secrets in env/profile DB, not source.");
+  add("Config", "DB password", dbPassword ? "green" : "red", dbPassword ? "Provided through environment." : "Missing MTM_DB_PASSWORD/MYSQL_PWD.", "Set MTM_DB_PASSWORD before full setup.");
+  add("Security", "Token encryption", tokenEncryptionSecret ? "green" : "red", tokenEncryptionSecret ? "Profile tokens can be encrypted in DB." : "Missing MTM_TOKEN_ENCRYPTION_KEY/MTM_SECRET_KEY.", "Set a stable encryption key before saving tokens.");
+  let dbOk = false;
+  if (dbPassword) {
+    try {
+      await mysqlJson("SELECT 1");
+      dbOk = true;
+      add("Database", "MariaDB connection", "green", `${dbUser}@${dbName} reachable.`, "Incremental setup can validate/repair app tables.");
+    } catch (error) {
+      add("Database", "MariaDB connection", "red", error.message, "Run full setup after DB credentials/connectivity are fixed.");
+    }
+  } else {
+    add("Database", "MariaDB connection", "red", "Not checked because DB password is missing.", "Provide MTM_DB_PASSWORD.");
+  }
+  const tableNames = [dbStateTable, dbSecretsTable, "rs_daily", "stock_sector_master", "web_signal_snapshots", "web_system_journal"];
+  const tableRows = [];
+  if (dbOk) {
+    for (const table of tableNames) {
+      const raw = await optionalMysqlJson(`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=${sqlString(dbName)} AND table_name=${sqlString(table)}`);
+      const exists = Number(raw || 0) > 0;
+      tableRows.push({ table, exists });
+      add("Schema", table, exists ? "green" : table === dbStateTable || table === dbSecretsTable ? "red" : "amber", exists ? "Table exists." : "Table not found.", exists ? "No action." : "Run incremental setup for app tables; run full setup for source market tables.");
+    }
+  }
+  let businessDay = null;
+  try {
+    businessDay = await marketBusinessDayStatus();
+    add("Market Data", "Golden business date", businessDay.isCurrent ? "green" : "red", `Complete ${businessDay.latestCompleteDate || "none"}; due ${businessDay.dueDate || "NA"}; coverage ${businessDay.coverageRatio || 0}%.`, businessDay.isCurrent ? "No action." : "Run RS Daily Agent incremental load.");
+  } catch (error) {
+    add("Market Data", "Golden business date", "red", error.message, "Run full DB/data setup, then RS Daily Agent.");
+  }
+  let cache = null;
+  try {
+    cache = await dailyRsCacheStatus();
+    add("Cache", "Daily RS cache", cache.warming ? "amber" : cache.symbolCount ? "green" : "red", `${cache.status}; ${cache.symbolCount || 0} symbols; store ${cache.store || "none"}.`, cache.symbolCount ? "No action." : "Open Screener or run cache refresh after rs_daily load.");
+    add("Cache", "Redis", cache.redis?.ok ? "green" : "amber", cache.redis?.ok ? "Redis available." : `Using fallback: ${cache.redis?.error || "Redis unavailable"}.`, "Optional for local; recommended for production performance.");
+  } catch (error) {
+    add("Cache", "Daily RS cache", "red", error.message, "Validate DB and restart.");
+  }
+  const red = checks.filter((item) => item.status === "red").length;
+  const amber = checks.filter((item) => item.status === "amber").length;
+  const green = checks.filter((item) => item.status === "green").length;
+  return {
+    source: "mtm.setup.status",
+    generatedAt: new Date().toISOString(),
+    overall: red ? "red" : amber ? "amber" : "green",
+    summary: { green, amber, red, total: checks.length },
+    setupModes: [
+      { id: "incremental", label: "Incremental Setup", tone: red ? "amber" : "green", description: "Validate current config, create/repair MTM app tables, keep existing market data, warm caches, and resume missing RS Daily dates only.", command: "run-mtm-ui.bat, then use RS Daily Agent / Pipeline Monitor", bestFor: "Normal daily recovery, upgrades, local restarts." },
+      { id: "full", label: "Full Setup", tone: dbOk ? "amber" : "red", description: "Provision MariaDB schema, create app tables, configure secrets, load stock master, load rs_daily history, warm cache, then verify all workspaces.", command: "start-mtm-ui.bat for prompts, then run RS Daily Agent full/incremental plan", bestFor: "New machine, new schema, broken DB, first deployment." }
+    ],
+    db: { database: dbName, user: dbUser, stateTable: dbStateTable, secretsTable: dbSecretsTable, connected: dbOk, tables: tableRows },
+    businessDay,
+    cache,
+    checks
+  };
+}
+
 function publicUser(user) {
   const { passwordHash, passwordSalt, ...safe } = user;
   return { ...safe, appSubscriptions: appSubscriptionsFor(user), permissions: permissionsFor(user) };
@@ -6324,6 +6388,13 @@ async function handleHome(request, response, url) {
   if (url.pathname === "/api/home/business-day" && request.method === "GET") {
     try {
       return json(response, 200, await marketBusinessDayStatus());
+    } catch (error) {
+      return json(response, 500, { error: error.message });
+    }
+  }
+  if (url.pathname === "/api/home/setup-status" && request.method === "GET") {
+    try {
+      return json(response, 200, await setupStatusModel());
     } catch (error) {
       return json(response, 500, { error: error.message });
     }
