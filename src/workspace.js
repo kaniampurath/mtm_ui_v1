@@ -2256,7 +2256,7 @@ return `<div class="rs-agent-shell rs-monitor-shell"><section class="rs-agent-he
     const pathFor = (key) => rows.map((row, i) => Number.isFinite(Number(row[key])) ? `${i ? "L" : "M"}${x(i).toFixed(1)},${y(row[key]).toFixed(1)}` : "").filter(Boolean).join(" ");
     const maxVol = Math.max(...rows.map((row) => Number(row.volume || 0)), 1);
     const volumes = rows.slice(-40).map((row) => `<span style="--h:${Math.max(4, Number(row.volume || 0) / maxVol * 100).toFixed(1)}%"></span>`).join("");
-    return `<div class="candle-cache-shell"><header><div><span>Candle Cache</span><strong>${e(data.symbol)}</strong><small>${e(data.startDate || "")} to ${e(data.latestDate || "")}</small></div><b>${Number(latest.close || 0).toFixed(2)}</b></header><svg class="cache-candle-chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${candles}<path class="ma20" d="${pathFor("sma20")}"/><path class="ma50" d="${pathFor("sma50")}"/></svg><div class="cache-volume-bars">${volumes}</div><dl><dt>SMA20</dt><dd>${fmt(latest.sma20, 2)}</dd><dt>SMA50</dt><dd>${fmt(latest.sma50, 2)}</dd><dt>Vol20</dt><dd>${compactNumber(latest.avg_volume_20)}</dd></dl></div>`;
+    return `<div class="candle-cache-shell"><header><div><span>Candle Cache</span><strong>${e(data.symbol)}</strong><small>${e(data.startDate || "")} to ${e(data.latestDate || "")}</small></div><b>${Number(latest.close || 0).toFixed(2)}</b></header><svg class="cache-candle-chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${candles}<path class="ma20" d="${pathFor("sma20")}"/><path class="ma50" d="${pathFor("sma50")}"/></svg><div class="cache-volume-bars">${volumes}</div><dl><dt>SMA20</dt><dd>${fmtNumber(latest.sma20, 2)}</dd><dt>SMA50</dt><dd>${fmtNumber(latest.sma50, 2)}</dd><dt>Vol20</dt><dd>${compactNumber(latest.avg_volume_20)}</dd></dl></div>`;
   }
 
   async function hydrateCandleCacheTiles(silent = false) {
@@ -2280,6 +2280,10 @@ return `<div class="rs-agent-shell rs-monitor-shell"><section class="rs-agent-he
     if (Math.abs(n) >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
     if (Math.abs(n) >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
     return n.toLocaleString();
+  }
+
+  function fmtNumber(value, digits = 1) {
+    return Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "NA";
   }
 
   function bindWidgetEvents() {
