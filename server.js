@@ -1,4 +1,4 @@
-import http from "node:http";
+﻿import http from "node:http";
 import net from "node:net";
 import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
@@ -45,6 +45,8 @@ const minPasswordLength = Number(config.auth?.minPasswordLength || 10);
 const forcePasswordChangeOnFirstLogin = config.auth?.forcePasswordChangeOnFirstLogin !== false;
 const sessions = new Map();
 const signalLiveCache = new Map();
+const liveEventClients = new Set();
+let liveEventSequence = 0;
 let signalLiveCacheMeta = { captured: 0, symbols: 0, refreshedAt: null };
 let signalSnapshotRefreshRunning = false;
 let dailyRsCacheMemory = null;
@@ -91,6 +93,12 @@ const rsDailyAgent = { running: false, job: null };
 const pipelineAgent = { running: false, job: null };
 const rsDailyMonitorAgent = { running: false, job: null, last: null };
 const secLeadershipAgent = { running: false, job: null };
+const botCatalog = [
+  { id: "crypto-research", name: "Crypto Research", bucket: "Research", status: "ready", risk: "high", permissions: ["market:read"], description: "Crypto and token-linked market research queue. Uses market regime as a gating input before any trade workflow." },
+  { id: "superbot", name: "Superbot", bucket: "Orchestration", status: "guarded", risk: "high", permissions: ["market:read", "trading:read", "risk:read"], description: "Cross-screen orchestration bot for market, sector, industry, signal, trading, and risk context. Execution remains manual/guarded." },
+  { id: "bear-market-research", name: "Bear Market Research", bucket: "Risk", status: "ready", risk: "medium", permissions: ["market:read", "risk:read"], description: "Research bot focused on distribution, breadth damage, leadership failure, and defensive regime playbooks." },
+  { id: "strategy-creation", name: "Strategy Creation", bucket: "Strategy", status: "draft", risk: "medium", permissions: ["market:read", "trading:read"], description: "Strategy design workspace for universe, entry, exit, stop, sizing, regime filter, and backtest assumptions." }
+];
 const rsDailyShardRanges = [
   ["A", "B"], ["C", "D"], ["E", "G"], ["H", "L"],
   ["M", "O"], ["P", "R"], ["S", "T"], ["U", "Z"]
@@ -182,6 +190,25 @@ function verifyPassword(password, user) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
+function emitLiveEvent(type, payload = {}) {
+  const event = { id: ++liveEventSequence, type, at: new Date().toISOString(), payload };
+  const wire = `id: ${event.id}\nevent: ${type}\ndata: ${JSON.stringify(event)}\n\n`;
+  for (const client of [...liveEventClients]) {
+    try { client.write(wire); } catch { liveEventClients.delete(client); }
+  }
+  return event;
+}
+
+function liveEventSnapshot(session) {
+  return {
+    source: "mtm.live.events",
+    connected: liveEventClients.size,
+    sequence: liveEventSequence,
+    user: session.user.username,
+    serverTime: new Date().toISOString(),
+    streams: ["heartbeat", "workspace", "market_cache", "rs_daily", "signals", "bots"]
+  };
+}
 function publicUser(user) {
   const { passwordHash, passwordSalt, ...safe } = user;
   return { ...safe, appSubscriptions: appSubscriptionsFor(user), permissions: permissionsFor(user) };
@@ -238,8 +265,8 @@ function tokenHint(value) {
 
 function secretStatus(provider, row, envToken = "") {
   const env = configuredSecret(envToken);
-  if (row?.token_hint) return { provider, configured: true, source: "profile_db", masked: `••••${row.token_hint}`, updatedAt: row.updated_at || null, editable: false };
-  if (env) return { provider, configured: true, source: "environment", masked: `••••${tokenHint(env)}`, updatedAt: null, editable: false };
+  if (row?.token_hint) return { provider, configured: true, source: "profile_db", masked: `â€¢â€¢â€¢â€¢${row.token_hint}`, updatedAt: row.updated_at || null, editable: false };
+  if (env) return { provider, configured: true, source: "environment", masked: `â€¢â€¢â€¢â€¢${tokenHint(env)}`, updatedAt: null, editable: false };
   return { provider, configured: false, source: "none", masked: "", updatedAt: null, editable: false };
 }
 
@@ -2148,6 +2175,7 @@ async function runRsDailyShardJob(job) {
   if (!job.options?.dryRun) {
     job.events.unshift({ at: new Date().toISOString(), level: "info", text: "Refreshing 260-day screener/chart cache after RS Daily completion." });
     triggerDailyRsCacheWarm("rs_daily_completed", true);
+    emitLiveEvent("rs_daily_refresh_completed", { jobId: job.id, status: job.status, completedShards: job.completedShards, total: job.total, failures: job.failures.length });
     marketBusinessDayStatusCache = null;
   }
   rsDailyAgent.running = false;
@@ -4029,6 +4057,39 @@ async function dailyRsCache(options = {}) {
   return startDailyRsCacheWarm(options.reason || "demand", Boolean(options.force));
 }
 
+function candleIndicatorsForRows(rows = []) {
+  return rows.map((row, index) => {
+    const history = rows.slice(0, index + 1);
+    const sma20 = avgField(history, "close", Math.min(20, history.length));
+    const sma50 = avgField(history, "close", Math.min(50, history.length));
+    const avgVolume20 = avgField(history, "volume", Math.min(20, history.length));
+    const close = num(row.close);
+    return {
+      ...row,
+      symbol: String(row.stock_symbol || row.symbol || "").toUpperCase(),
+      sma20: round4(sma20),
+      sma50: round4(sma50),
+      avg_volume_20: round4(avgVolume20),
+      price_vs_sma20_pct: close && sma20 ? round4(((close - sma20) / sma20) * 100) : null,
+      price_vs_sma50_pct: close && sma50 ? round4(((close - sma50) / sma50) * 100) : null
+    };
+  });
+}
+
+async function candleCacheForSymbol(symbol, options = {}) {
+  const cleanSymbol = String(symbol || "SPY").trim().toUpperCase().replace(/[^A-Z0-9._-]/g, "").slice(0, 16) || "SPY";
+  const limit = clamp(Number(options.limit || 120), 20, 260);
+  const cache = await dailyRsCache({ noBuild: true, reason: "candle_cache_symbol" });
+  const item = cache.groupedBySymbol?.[cleanSymbol];
+  if (!item) return { source: "mtm.candle_cache", symbol: cleanSymbol, latestDate: cache.latestDate, startDate: cache.startDate, found: false, rows: [], indicators: ["sma20", "sma50", "avg_volume_20", "price_vs_sma20_pct", "price_vs_sma50_pct"] };
+  const rows = candleIndicatorsForRows((item.rows || []).slice(-limit));
+  return { source: "mtm.candle_cache", symbol: cleanSymbol, latestDate: cache.latestDate, startDate: rows[0]?.sdate || cache.startDate, found: true, rows, latest: rows.at(-1) || null, indicators: ["sma20", "sma50", "avg_volume_20", "price_vs_sma20_pct", "price_vs_sma50_pct"], cache: { store: dailyRsCacheMeta.store, status: dailyRsCacheMeta.status, builtAt: cache.builtAt } };
+}
+
+async function candleCacheStatus() {
+  const status = await dailyRsCacheStatus();
+  return { source: "mtm.candle_cache.status", status: status.status, warming: status.warming, latestDate: status.latestDate, startDate: status.startDate, rowCount: status.rowCount, symbolCount: status.symbolCount, store: status.store, indicators: ["sma20", "sma50", "avg_volume_20", "price_vs_sma20_pct", "price_vs_sma50_pct"] };
+}
 async function dailyRsCacheStatus() {
   let redis = { ...redisPublicInfo(), ok: false };
   if (redisEnabled) {
@@ -6410,7 +6471,7 @@ async function handlePipeline(request, response, url) {
   }
   if (url.pathname === "/api/pipeline/daily-report" && request.method === "GET") return json(response, 200, await dailyReportModel());
   if (url.pathname === "/api/pipeline/reasoning-images" && request.method === "GET") return json(response, 200, await reasoningImagesModel());
-  if (url.pathname === "/api/pipeline/run" && request.method === "POST") return json(response, 200, await runPipelineRefresh());
+  if (url.pathname === "/api/pipeline/run" && request.method === "POST") { const result = await runPipelineRefresh(); emitLiveEvent("pipeline_refresh_completed", { status: result.status || "completed", completedAt: new Date().toISOString() }); return json(response, 200, result); }
   return json(response, 404, { error: "Not found" });
 }
 
@@ -6609,6 +6670,48 @@ async function handleAuth(request, response, url) {
   return json(response, 404, { error: "Not found" });
 }
 
+async function handleLive(request, response, url) {
+  const session = await requireSession(request, response);
+  if (!session) return;
+  if (url.pathname === "/api/live/status" && request.method === "GET") return json(response, 200, liveEventSnapshot(session));
+  if (url.pathname === "/api/live/events" && request.method === "GET") {
+    response.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no"
+    });
+    response.write(`event: connected\ndata: ${JSON.stringify(liveEventSnapshot(session))}\n\n`);
+    liveEventClients.add(response);
+    const heartbeat = setInterval(() => {
+      try { response.write(`event: heartbeat\ndata: ${JSON.stringify(liveEventSnapshot(session))}\n\n`); }
+      catch { clearInterval(heartbeat); liveEventClients.delete(response); }
+    }, 25000);
+    request.on("close", () => { clearInterval(heartbeat); liveEventClients.delete(response); });
+    return;
+  }
+  return json(response, 404, { error: "Not found" });
+}
+
+async function handleBots(request, response, url) {
+  const session = await requireSession(request, response);
+  if (!session) return;
+  if (url.pathname === "/api/bots/catalog" && request.method === "GET") {
+    const permissions = new Set(permissionsFor(session.user));
+    const bots = botCatalog.map((bot) => ({ ...bot, enabled: session.user.role === "admin" || bot.permissions.every((permission) => permissions.has(permission) || permissions.has("capabilities:all") || permissions.has("capabilities:subscribed")) }));
+    return json(response, 200, { source: "mtm.bot_catalog", asOf: new Date().toISOString(), bots, buckets: [...new Set(botCatalog.map((bot) => bot.bucket))] });
+  }
+  return json(response, 404, { error: "Not found" });
+}
+
+async function handleCandleCache(request, response, url) {
+  const session = await requireSession(request, response);
+  if (!session) return;
+  if (url.pathname === "/api/candle-cache/status" && request.method === "GET") return json(response, 200, await candleCacheStatus());
+  const match = url.pathname.match(/^\/api\/candle-cache\/symbol\/([^/]+)$/);
+  if (match && request.method === "GET") { try { return json(response, 200, await candleCacheForSymbol(decodeURIComponent(match[1]), { limit: url.searchParams.get("limit") })); } catch (error) { if (error.code === "CACHE_WARMING") return json(response, 202, { source: "mtm.candle_cache", warming: true, message: error.message, status: await candleCacheStatus(), rows: [] }); throw error; } }
+  return json(response, 404, { error: "Not found" });
+}
 async function handleUsers(request, response, url) {
   const session = await requireAdmin(request, response);
   if (!session) return;
@@ -6683,6 +6786,9 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname.startsWith("/api/auth/")) return handleAuth(request, response, url);
     if (url.pathname.startsWith("/api/users")) return handleUsers(request, response, url);
     if (url.pathname.startsWith("/api/home/")) return handleHome(request, response, url);
+    if (url.pathname.startsWith("/api/live/")) return handleLive(request, response, url);
+    if (url.pathname.startsWith("/api/bots/")) return handleBots(request, response, url);
+    if (url.pathname.startsWith("/api/candle-cache/")) return handleCandleCache(request, response, url);
     if (url.pathname.startsWith("/api/market-monitor/")) return handleMarketMonitor(request, response, url);
     if (url.pathname.startsWith("/api/market-cycle/")) return handleMarketCycle(request, response, url);
     if (url.pathname.startsWith("/api/market/")) return handleMarket(request, response, url);
@@ -6727,6 +6833,10 @@ server.listen(port, host, () => {
   console.log(`MTM UI pilot running at http://${host}:${port}`);
   setTimeout(() => triggerDailyRsCacheWarm("startup", false), 30000);
 });
+
+
+
+
 
 
 

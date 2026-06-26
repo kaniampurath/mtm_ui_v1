@@ -1,5 +1,5 @@
-import { ContextBus, EventBus, LINK_GROUPS, MemoryDashboardRepository } from "./framework.js?v=20260531e";
-import { capabilityPlugins, categories } from "./plugins.js?v=20260607o";
+﻿import { ContextBus, EventBus, LINK_GROUPS, MemoryDashboardRepository } from "./framework.js?v=20260531e";
+import { capabilityPlugins, categories } from "./plugins.js?v=20260626a";
 
 const GRID_COLUMNS = 24, ROW_HEIGHT = 24, MAX_WIDGETS = 20;
 const SCREENER_PAGE_SIZE = 240;
@@ -18,7 +18,7 @@ const workspaceSeeds = {
   trading: ["trading-system-monitor"],
   risk: ["risk-cockpit", "market-cycle-tracker", "exposure-monitor", "drawdown-monitor", "market-breadth"],
   portfolio: ["watchlist", "performance-chart", "position-monitor", "market-brief"],
-  agents: ["rs-daily-agent", "rs-data-monitor-agent", "pipeline-monitor-agent", "rs-ranking-agent", "agent-console"]
+  agents: ["rs-daily-agent", "rs-data-monitor-agent", "pipeline-monitor-agent", "rs-ranking-agent", "bots-lab", "live-cache-monitor", "candle-cache"]
 };
 const defaultPreferences = { theme: "dark", density: "comfortable", defaultWorkspaceId: "dashboard-default", defaultDashboardWorkspaceId: "dashboard-default", autoSave: true, autoRestore: true, sidebarExpanded: false, defaultRefreshInterval: 60, liveRefresh: false, confirmWorkspaceDelete: true, confirmAppRemove: true, notifications: true, widgetStyle: "standard" };
 const preferredWidgetSizes = {
@@ -37,6 +37,9 @@ const preferredWidgetSizes = {
   , "pipeline-monitor-agent": { w: 12, h: 16 }
   , "rs-data-monitor-agent": { w: 14, h: 18 }
   , "rs-ranking-agent": { w: 12, h: 16 }
+  , "bots-lab": { w: 12, h: 16 }
+  , "live-cache-monitor": { w: 10, h: 12 }
+  , "candle-cache": { w: 12, h: 16 }
 };
 
 const screenerColumnCatalog = [
@@ -122,15 +125,17 @@ export async function createWorkspace(root, session = {}) {
     activeNav: "Home", activeView: "home", drawerOpen: false, eventLog: [],
     workspaces, templates: await repository.loadTemplates(),
     preferences: { ...defaultPreferences, ...(savedProfile || {}), ...(savedPreferences || {}) },
-    profile: savedProfile || { userId, displayName: session.user?.displayName || userId }, profileTokens: null, tokenEditMode: false, tokenMessage: "", screenerView: normalizeScreenerView(savedScreenerView), screenerResearch: normalizeScreenerResearch(savedScreenerResearch), minerviniEsFilter: "all", lastUsersPayload: null, lastRsDailyRefreshJobId: null
+    profile: savedProfile || { userId, displayName: session.user?.displayName || userId }, profileTokens: null, tokenEditMode: false, tokenMessage: "", screenerView: normalizeScreenerView(savedScreenerView), screenerResearch: normalizeScreenerResearch(savedScreenerResearch), minerviniEsFilter: "all", lastUsersPayload: null, lastRsDailyRefreshJobId: null, liveEvents: [], liveStatus: null
   };
   state.activeWorkspaceId = resolveInitialWorkspace(state.workspaces, state.preferences).id;
+  let liveEventSource = null;
   sanitizeWorkspaces();
   root.innerHTML = shellTemplate(); bindShell(); renderMain(); persistAll(); hydrateBusinessDayStatus();
   const businessDayTimer = setInterval(hydrateBusinessDayStatus, 30000);
   eventBus.on("*", (event) => { state.eventLog = [event, ...state.eventLog].slice(0, 6); renderEventLog(); });
   eventBus.on("context_updated", (event) => renderWidgets(event.link_group));
   eventBus.on("rs_daily_refresh_completed", hydrateBusinessDayStatus);
+  initLiveEvents();
 
   function shellTemplate() {
     return `<div class="app-shell" data-theme="${e(state.preferences.theme)}" data-density="${e(state.preferences.density)}">
@@ -2169,6 +2174,106 @@ return `<div class="rs-agent-shell rs-monitor-shell"><section class="rs-agent-he
     return `<div class="minervini-tv-chart"><header><div><strong>${e(s.symbol || data.symbol || "")}</strong><span>${e(s.companyName || "")} | ${e(s.sector || "")} ${e(s.industry || "")}</span></div><b>${Number(latest.close || 0).toFixed(2)}</b></header><svg class="minervini-price-chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${grid}<path class="ma ma20" d="${maPath(ma20)}"/><path class="ma ma50" d="${maPath(ma50)}"/>${candles}</svg><div class="minervini-volume"><span>Vol</span><svg viewBox="0 0 ${w} ${volH}" preserveAspectRatio="none">${volumes}</svg></div><footer><span>SMA20</span><span>SMA50</span><span>Daily candles</span></footer></div>`;
   }
 
+  function initLiveEvents() {
+    if (liveEventSource || typeof EventSource === "undefined") return;
+    try {
+      liveEventSource = new EventSource("/api/live/events");
+      liveEventSource.addEventListener("connected", (ev) => updateLiveStatus(ev.data));
+      liveEventSource.addEventListener("heartbeat", (ev) => updateLiveStatus(ev.data));
+      ["rs_daily_refresh_completed", "pipeline_refresh_completed", "workspace", "market_cache", "signals", "bots"].forEach((type) => {
+        liveEventSource.addEventListener(type, (ev) => pushLiveEvent(type, ev.data));
+      });
+      liveEventSource.onerror = () => {
+        state.liveStatus = { ...(state.liveStatus || {}), source: "mtm.live.events", degraded: true, lastError: "SSE disconnected; polling fallback remains active.", serverTime: new Date().toISOString() };
+        hydrateLiveCacheMonitorTiles(true);
+      };
+    } catch (error) {
+      state.liveStatus = { source: "mtm.live.events", degraded: true, lastError: error.message, serverTime: new Date().toISOString() };
+    }
+  }
+
+  function updateLiveStatus(raw) {
+    try { state.liveStatus = JSON.parse(raw); } catch { state.liveStatus = { source: "mtm.live.events", serverTime: new Date().toISOString() }; }
+    hydrateLiveCacheMonitorTiles(true);
+  }
+
+  function pushLiveEvent(type, raw) {
+    let event;
+    try { event = JSON.parse(raw); } catch { event = { type, at: new Date().toISOString(), payload: {} }; }
+    state.liveEvents = [event, ...(state.liveEvents || [])].slice(0, 18);
+    eventBus.emit(type, event.payload || {});
+    hydrateLiveCacheMonitorTiles(true);
+  }
+
+  function botTone(bot) {
+    if (!bot.enabled) return "bad";
+    if (bot.status === "ready") return "good";
+    if (bot.status === "guarded") return "warn";
+    return "neutral";
+  }
+
+  function botsLabTemplate(data = {}) {
+    const rows = (data.bots || []).map((bot) => `<article class="bot-row tone-${botTone(bot)}" title="${e(bot.description)}"><div><strong>${e(bot.name)}</strong><span>${e(bot.bucket)} | ${e(bot.status)} | ${e(bot.risk)} risk</span></div><b>${bot.enabled ? "Enabled" : "Locked"}</b></article>`).join("");
+    return `<div class="bot-lab-shell"><header><div><span>Bot Catalog</span><strong>Guarded Research Buckets</strong><small>${e(data.asOf || "")}</small></div><b>${e((data.bots || []).length)}</b></header><div class="bot-grid">${rows || `<div class="widget-empty">No bots registered.</div>`}</div></div>`;
+  }
+
+  async function hydrateBotsLabTiles(silent = false) {
+    const tiles = [...root.querySelectorAll("[data-bots-lab]")];
+    if (!tiles.length) return;
+    try {
+      const data = await api("/api/bots/catalog", null, "GET");
+      tiles.forEach((tile) => tile.innerHTML = botsLabTemplate(data));
+    } catch (error) {
+      if (!silent) tiles.forEach((tile) => tile.innerHTML = `<div class="widget-error">${e(error.message)}</div>`);
+    }
+  }
+
+  async function hydrateLiveCacheMonitorTiles(silent = false) {
+    const tiles = [...root.querySelectorAll("[data-live-cache-monitor]")];
+    if (!tiles.length) return;
+    try {
+      if (!state.liveStatus) state.liveStatus = await api("/api/live/status", null, "GET");
+      const events = (state.liveEvents || []).map((event) => `<li><span>${e(event.type || "event")}</span><strong>${e(new Date(event.at || Date.now()).toLocaleTimeString())}</strong></li>`).join("");
+      const degraded = state.liveStatus?.degraded;
+      tiles.forEach((tile) => tile.innerHTML = `<div class="live-cache-shell"><header class="tone-${degraded ? "warn" : "good"}"><div><span>Live Cache Monitor</span><strong>${degraded ? "Polling fallback" : "SSE connected"}</strong><small>${e(state.liveStatus?.serverTime || "")}</small></div><b>${e(state.liveStatus?.connected ?? 0)}</b></header><ul>${events || `<li><span>No live events yet</span><strong>Ready</strong></li>`}</ul>${state.liveStatus?.lastError ? `<p>${e(state.liveStatus.lastError)}</p>` : ""}</div>`);
+    } catch (error) {
+      if (!silent) tiles.forEach((tile) => tile.innerHTML = `<div class="widget-error">${e(error.message)}</div>`);
+    }
+  }
+
+  function candleCacheTemplate(data = {}) {
+    if (data.warming) return `<div class="widget-loading">Candle cache warming...</div>`;
+    if (!data.found) return `<div class="widget-error">${e(data.symbol || "Symbol")} not found in candle cache.</div>`;
+    const rows = data.rows || [];
+    const latest = data.latest || rows.at(-1) || {};
+    const w = 520, h = 190, pad = 18;
+    const prices = rows.flatMap((row) => [Number(row.high), Number(row.low), Number(row.sma20), Number(row.sma50)]).filter(Number.isFinite);
+    const min = Math.min(...prices), max = Math.max(...prices), span = max - min || 1;
+    const x = (i) => pad + (i / Math.max(1, rows.length - 1)) * (w - pad * 2);
+    const y = (v) => h - pad - ((Number(v) - min) / span) * (h - pad * 2);
+    const cw = Math.max(2, Math.min(7, (w - pad * 2) / Math.max(1, rows.length) * .7));
+    const candles = rows.map((row, i) => { const open = Number(row.open), close = Number(row.close), high = Number(row.high), low = Number(row.low), up = close >= open, cx = x(i), top = y(Math.max(open, close)), bottom = y(Math.min(open, close)); return `<g class="${up ? "up" : "down"}"><line x1="${cx}" x2="${cx}" y1="${y(high)}" y2="${y(low)}"/><rect x="${cx - cw / 2}" y="${top}" width="${cw}" height="${Math.max(1, bottom - top)}"/></g>`; }).join("");
+    const pathFor = (key) => rows.map((row, i) => Number.isFinite(Number(row[key])) ? `${i ? "L" : "M"}${x(i).toFixed(1)},${y(row[key]).toFixed(1)}` : "").filter(Boolean).join(" ");
+    const maxVol = Math.max(...rows.map((row) => Number(row.volume || 0)), 1);
+    const volumes = rows.slice(-40).map((row) => `<span style="--h:${Math.max(4, Number(row.volume || 0) / maxVol * 100).toFixed(1)}%"></span>`).join("");
+    return `<div class="candle-cache-shell"><header><div><span>Candle Cache</span><strong>${e(data.symbol)}</strong><small>${e(data.startDate || "")} to ${e(data.latestDate || "")}</small></div><b>${Number(latest.close || 0).toFixed(2)}</b></header><svg class="cache-candle-chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${candles}<path class="ma20" d="${pathFor("sma20")}"/><path class="ma50" d="${pathFor("sma50")}"/></svg><div class="cache-volume-bars">${volumes}</div><dl><dt>SMA20</dt><dd>${fmt(latest.sma20, 2)}</dd><dt>SMA50</dt><dd>${fmt(latest.sma50, 2)}</dd><dt>Vol20</dt><dd>${compactNumber(latest.avg_volume_20)}</dd></dl></div>`;
+  }
+
+  async function hydrateCandleCacheTiles(silent = false) {
+    const tiles = [...root.querySelectorAll("[data-candle-cache]")];
+    if (!tiles.length) return;
+    for (const tile of tiles) {
+      try {
+        const card = tile.closest("[data-widget-id]");
+        const widget = currentWorkspace().widgets.find((item) => item.id === card?.dataset.widgetId);
+        const symbol = widget?.config?.symbol || contextBus.get(widget?.linkGroup).symbol || "SPY";
+        const data = await api(`/api/candle-cache/symbol/${encodeURIComponent(symbol)}?limit=120`, null, "GET");
+        tile.innerHTML = candleCacheTemplate(data);
+      } catch (error) {
+        if (!silent) tile.innerHTML = `<div class="widget-error">${e(error.message)}</div>`;
+      }
+    }
+  }
   function compactNumber(value) {
     const n = Number(value);
     if (!Number.isFinite(n)) return "";
@@ -2178,14 +2283,14 @@ return `<div class="rs-agent-shell rs-monitor-shell"><section class="rs-agent-he
   }
 
   function bindWidgetEvents() {
-    hydrateScreenerTiles(); hydrateMarketMonitorTiles(); hydrateMarketCycleTiles(); hydrateMarketCockpitTiles(); hydrateGroupCockpitTiles(); hydrateLeadersCockpitTiles(); hydrateMinerviniScreenTiles(); hydrateSignalsCockpitTiles(); hydrateWatchlistTiles(); hydrateRiskCockpitTiles(); hydrateTradingSystemMonitorTiles(); hydrateRsAgentTiles(); hydrateRsDataMonitorTiles(); hydratePipelineAgentTiles(); hydrateRsRankingTiles(); hydrateDailyReportTiles(); hydrateReasoningImagesTiles();
+    hydrateScreenerTiles(); hydrateMarketMonitorTiles(); hydrateMarketCycleTiles(); hydrateMarketCockpitTiles(); hydrateGroupCockpitTiles(); hydrateLeadersCockpitTiles(); hydrateMinerviniScreenTiles(); hydrateSignalsCockpitTiles(); hydrateWatchlistTiles(); hydrateRiskCockpitTiles(); hydrateTradingSystemMonitorTiles(); hydrateRsAgentTiles(); hydrateRsDataMonitorTiles(); hydratePipelineAgentTiles(); hydrateRsRankingTiles(); hydrateBotsLabTiles(); hydrateLiveCacheMonitorTiles(); hydrateCandleCacheTiles(); hydrateDailyReportTiles(); hydrateReasoningImagesTiles();
     root.querySelectorAll(".widget-card").forEach((card) => { const w = currentWorkspace().widgets.find((item) => item.id === card.dataset.widgetId); if (!w) return; card.querySelector(".drag-handle")?.addEventListener("pointerdown", (ev) => startDrag(ev, w)); card.querySelector(".resize-handle")?.addEventListener("pointerdown", (ev) => startResize(ev, w)); card.querySelector("[data-widget-menu]")?.addEventListener("click", () => { const m = card.querySelector(".widget-menu"); m.hidden = !m.hidden; }); card.querySelector("[data-refresh-signals-live]")?.addEventListener("click", (ev) => refreshSignalsLive(ev.currentTarget)); card.querySelector("[data-risk-settings]")?.addEventListener("submit", saveRiskSettings); card.querySelector("[data-link-group]")?.addEventListener("change", (ev) => { w.linkGroup = ev.target.value; renderWidgets(); persistAll(); }); card.querySelectorAll("[data-symbol]").forEach((b) => b.addEventListener("click", () => { contextBus.update(w.linkGroup, { symbol: b.dataset.symbol }, w.id); eventBus.emit("symbol_selected", { symbol: b.dataset.symbol, link_group: w.linkGroup }); })); card.querySelectorAll("[data-action]").forEach((b) => b.addEventListener("click", () => runWidgetAction(b.dataset.action, w))); });
     if (!timers.has("__signals_cache__")) timers.set("__signals_cache__", window.setInterval(reloadSignalsCockpitTilesFromCache, 30000));
     if (!timers.has("__watchlist_cache__")) timers.set("__watchlist_cache__", window.setInterval(() => {
       hydrateWatchlistTiles(true);
       if (state.screenerView.autoRefresh) hydrateScreenerTiles(true);
     }, 30000));
-    if (!timers.has("__rs_agent__")) timers.set("__rs_agent__", window.setInterval(() => { hydrateRsAgentTiles(true); hydrateRsDataMonitorTiles(true); hydratePipelineAgentTiles(true); pollMinerviniScreenTiles(); }, 10000));
+    if (!timers.has("__rs_agent__")) timers.set("__rs_agent__", window.setInterval(() => { hydrateRsAgentTiles(true); hydrateRsDataMonitorTiles(true); hydratePipelineAgentTiles(true); pollMinerviniScreenTiles(); hydrateBotsLabTiles(true); hydrateLiveCacheMonitorTiles(true); hydrateCandleCacheTiles(true); }, 10000));
   }
   function runWidgetAction(action, w) {
     const ws = currentWorkspace(), p = pluginById.get(w.pluginId);
@@ -2413,6 +2518,8 @@ function now() { return new Date().toISOString(); }
 function clamp(value, min, max) { return Math.min(max, Math.max(min, value)); }
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
 function e(value) { return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]); }
+
+
 
 
 
