@@ -58,8 +58,8 @@ async function main() {
   await timed("Health", "served module cache bust", async () => {
     const response = await fetch(`${base}/src/main.js`);
     const text = await response.text();
-    if (!text.includes("workspace.js?v=20260626c")) throw new Error("main.js not serving latest workspace module");
-    return "workspace.js?v=20260626c";
+    if (!text.includes("workspace.js?v=20260626d")) throw new Error("main.js not serving latest workspace module");
+    return "workspace.js?v=20260626d";
   });
 
   await timed("Auth", "admin login", async () => {

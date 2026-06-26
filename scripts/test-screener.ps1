@@ -129,8 +129,8 @@ try {
 
   Invoke-Timed "Technical" "module cache bust version" {
     $main = Invoke-WebRequest -Uri "$BaseUrl/src/main.js" -TimeoutSec 30 -UseBasicParsing
-    Assert-True ($main.Content -match 'workspace\.js\?v=20260626c') "main.js is not pointing at workspace.js?v=20260626c"
-    "workspace.js?v=20260626c"
+    Assert-True ($main.Content -match 'workspace\.js\?v=20260626d') "main.js is not pointing at workspace.js?v=20260626d"
+    "workspace.js?v=20260626d"
   } "P1"
 
   Invoke-Timed "Security" "screener API rejects unauthenticated request" {

@@ -3,7 +3,7 @@ import { capabilityPlugins, categories } from "./plugins.js?v=20260626a";
 
 const GRID_COLUMNS = 24, ROW_HEIGHT = 24, MAX_WIDGETS = 20;
 const SCREENER_PAGE_SIZE = 240;
-const WORKSPACE_NAV = ["Dashboard", "Market", "Scanner", "Signal", "Trading", "Risk", "Portfolio", "Agents"];
+const WORKSPACE_NAV = ["Dashboard", "Market", "Scanner", "Signal", "Trading", "Risk", "Portfolio", "Agents", "Bots"];
 const navItems = ["Home", ...WORKSPACE_NAV, "Marketplace", "Profile", "Settings", "Help"];
 const pluginById = new Map(capabilityPlugins.map((plugin) => [plugin.id, plugin]));
 const guestAppIds = ["screener", "watchlist", "market-brief", "market-cockpit", "market-monitor", "market-cycle-tracker", "sector-cockpit", "industry-cockpit", "leaders-cockpit"];
@@ -18,7 +18,8 @@ const workspaceSeeds = {
   trading: ["trading-system-monitor"],
   risk: ["risk-cockpit", "market-cycle-tracker", "exposure-monitor", "drawdown-monitor", "market-breadth"],
   portfolio: ["watchlist", "performance-chart", "position-monitor", "market-brief"],
-  agents: ["rs-daily-agent", "rs-data-monitor-agent", "pipeline-monitor-agent", "rs-ranking-agent", "bots-lab", "live-cache-monitor", "candle-cache"]
+  agents: ["rs-daily-agent", "rs-data-monitor-agent", "pipeline-monitor-agent", "rs-ranking-agent", "bots-lab", "live-cache-monitor", "candle-cache"],
+  bots: ["bots-lab", "live-cache-monitor", "candle-cache", "agent-console", "research-agent", "signal-agent", "risk-agent"]
 };
 const defaultPreferences = { theme: "dark", density: "comfortable", defaultWorkspaceId: "dashboard-default", defaultDashboardWorkspaceId: "dashboard-default", autoSave: true, autoRestore: true, sidebarExpanded: false, defaultRefreshInterval: 60, liveRefresh: false, confirmWorkspaceDelete: true, confirmAppRemove: true, notifications: true, widgetStyle: "standard" };
 const preferredWidgetSizes = {
@@ -2532,7 +2533,7 @@ function currentSessionUser() { return window.mtmUiSession?.user || { username: 
 async function api(url, body, method = "POST") { const options = method === "GET" ? { method } : { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined }; const res = await fetch(url, options); return res.json(); }
 function userStatusLabel(session) { const u = session.user || {}; return `${u.username || "User"} - ${roleLabel(u.role)}${u.role === "power_user" ? ` / ${u.subscriptionStatus || "inactive"}` : ""}`; }
 function roleLabel(role) { return userRoles.includes(role) ? role : "guest"; }
-function iconFor(item) { return ({ Home: "H", Dashboard: "D", Market: "M", Scanner: "S", Signal: "G", Trading: "T", Risk: "R", Portfolio: "P", Agents: "AI", Marketplace: "+", Profile: "MT", Settings: "*", Help: "?" })[item] || item[0]; }
+function iconFor(item) { return ({ Home: "H", Dashboard: "D", Market: "M", Scanner: "S", Signal: "G", Trading: "T", Risk: "R", Portfolio: "P", Agents: "AI", Bots: "BT", Marketplace: "+", Profile: "MT", Settings: "*", Help: "?" })[item] || item[0]; }
 function avatarText() { return (currentSessionUser().username || "MT").slice(0, 2).toUpperCase(); }
 function titleCase(value) { return String(value || "").replace(/[-_]/g, " ").replace(/\b\w/g, (char) => char.toUpperCase()); }
 function now() { return new Date().toISOString(); }
