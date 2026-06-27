@@ -58,8 +58,8 @@ async function main() {
   await timed("Health", "served module cache bust", async () => {
     const response = await fetch(`${base}/src/main.js`);
     const text = await response.text();
-    if (!text.includes("workspace.js?v=20260626d")) throw new Error("main.js not serving latest workspace module");
-    return "workspace.js?v=20260626d";
+    if (!text.includes("workspace.js?v=20260627a")) throw new Error("main.js not serving latest workspace module");
+    return "workspace.js?v=20260627a";
   });
 
   await timed("Auth", "admin login", async () => {
@@ -128,6 +128,40 @@ async function main() {
     const { response } = await request("/api/users", { cookie: powerCookie });
     if (response.status !== 403) throw new Error(`expected 403, got ${response.status}`);
     return "403 as expected";
+  });
+
+  await timed("Bots/Pattern", "pattern bot catalog visible to admin", async () => {
+    const { response, json } = await request("/api/bots/catalog");
+    if (!response.ok) throw new Error(json.error || `HTTP ${response.status}`);
+    const bot = (json.bots || []).find((item) => item.id === "pattern-bot");
+    if (!bot) throw new Error("pattern-bot missing from catalog");
+    if (!bot.enabled) throw new Error("pattern-bot disabled for admin");
+    return `${bot.name} ${bot.status}`;
+  });
+
+  await timed("Bots/Pattern", "pattern bot cockpit contract", async () => {
+    const { response, json } = await request("/api/pattern-bot/cockpit?limit=8");
+    if (!response.ok) throw new Error(json.error || `HTTP ${response.status}`);
+    if (json.source !== "mtm.pattern_bot.cockpit") throw new Error(`source=${json.source}`);
+    if (!json.sourceTruth?.dailyCache || !json.sourceTruth?.risk || !json.sourceTruth?.commands) throw new Error("source truth mapping missing");
+    if (!json.shortcut || !json.riskGate || !json.backtest || !json.execution || !json.journal) throw new Error("cockpit panels missing");
+    return `${json.shortcut.mode}/${json.riskGate.status}`;
+  });
+
+  await timed("Bots/Pattern", "pattern bot audited admin command", async () => {
+    const { response, json } = await request("/api/pattern-bot/command", { method: "POST", body: { commandType: "PAUSE", payload: { symbol: "SPY" }, reason: "full QA pause guard" } });
+    if (!response.ok) throw new Error(json.error || `HTTP ${response.status}`);
+    if (!json.commandId || json.commandType !== "PAUSE") throw new Error("command ack missing");
+    if (json.state?.status !== "PAUSED") throw new Error(`state=${json.state?.status}`);
+    if (!Array.isArray(json.commands) || !json.commands.some((item) => item.id === json.commandId)) throw new Error("command not returned from audit log");
+    return `${json.commandType} ${json.state.status}`;
+  });
+
+  await timed("Bots/Pattern", "power user without bot subscription cannot command", async () => {
+    const { response, json } = await request("/api/pattern-bot/command", { method: "POST", cookie: powerCookie, body: { commandType: "START_PAPER", payload: { symbol: "SPY" }, reason: "blocked QA command" } });
+    if (response.status !== 400) throw new Error(json.error || `expected 400, got ${response.status}`);
+    if (!String(json.error || "").includes("not allowed")) throw new Error(`unexpected error=${json.error}`);
+    return "blocked by app subscription";
   });
 
   await timed("Users/RBAC", "default admin modification blocked", async () => {

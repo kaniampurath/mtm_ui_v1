@@ -56,6 +56,7 @@ let rsDailyLoadPlanCache = null;
 let marketBusinessDayStatusCache = null;
 let marketMonitorSnapshotCache = null;
 let marketHierarchyCache = null;
+let redisBackoffUntil = 0;
 const marketCycleSnapshotCache = new Map();
 const marketNewsCache = new Map();
 const marketMonitorInferencePromptContract = {
@@ -94,11 +95,14 @@ const pipelineAgent = { running: false, job: null };
 const rsDailyMonitorAgent = { running: false, job: null, last: null };
 const secLeadershipAgent = { running: false, job: null };
 const botCatalog = [
+  { id: "pattern-bot", name: "Pattern Bot", bucket: "Trading", status: "guarded", risk: "high", permissions: ["market:read", "signals:read", "risk:read", "trading:read"], description: "Headless pattern-trading cockpit using RS cache, signal book, risk gate, backtest evidence, and audited command controls." },
   { id: "crypto-research", name: "Crypto Research", bucket: "Research", status: "ready", risk: "high", permissions: ["market:read"], description: "Crypto and token-linked market research queue. Uses market regime as a gating input before any trade workflow." },
   { id: "superbot", name: "Superbot", bucket: "Orchestration", status: "guarded", risk: "high", permissions: ["market:read", "trading:read", "risk:read"], description: "Cross-screen orchestration bot for market, sector, industry, signal, trading, and risk context. Execution remains manual/guarded." },
   { id: "bear-market-research", name: "Bear Market Research", bucket: "Risk", status: "ready", risk: "medium", permissions: ["market:read", "risk:read"], description: "Research bot focused on distribution, breadth damage, leadership failure, and defensive regime playbooks." },
   { id: "strategy-creation", name: "Strategy Creation", bucket: "Strategy", status: "draft", risk: "medium", permissions: ["market:read", "trading:read"], description: "Strategy design workspace for universe, entry, exit, stop, sizing, regime filter, and backtest assumptions." }
 ];
+const patternBotStateTable = "pattern_bot_state";
+const patternBotCommandTable = "pattern_bot_commands";
 const rsDailyShardRanges = [
   ["A", "B"], ["C", "D"], ["E", "G"], ["H", "L"],
   ["M", "O"], ["P", "R"], ["S", "T"], ["U", "Z"]
@@ -3941,6 +3945,7 @@ function parseRespValue(buffer, offset = 0) {
 
 function redisCommand(command, args = [], timeoutMs = 1800) {
   if (!redisEnabled) return Promise.reject(new Error("Redis disabled"));
+  if (Date.now() < redisBackoffUntil) return Promise.reject(new Error("Redis temporarily unavailable; using memory cache fallback"));
   let location;
   try { location = new URL(redisUrl); } catch { return Promise.reject(new Error("Invalid Redis URL")); }
   const host = location.hostname || "127.0.0.1";
@@ -3957,6 +3962,7 @@ function redisCommand(command, args = [], timeoutMs = 1800) {
     let responses = 0;
     const timer = setTimeout(() => {
       socket.destroy();
+      redisBackoffUntil = Date.now() + 30000;
       reject(new Error(`Redis timed out at ${host}:${port}`));
     }, timeoutMs);
     socket.on("connect", () => socket.write(payload));
@@ -3975,6 +3981,7 @@ function redisCommand(command, args = [], timeoutMs = 1800) {
         if (responses >= commands.length) {
           clearTimeout(timer);
           socket.destroy();
+          redisBackoffUntil = 0;
           resolve(last);
         }
       } catch (error) {
@@ -3985,6 +3992,7 @@ function redisCommand(command, args = [], timeoutMs = 1800) {
     });
     socket.on("error", (error) => {
       clearTimeout(timer);
+      redisBackoffUntil = Date.now() + 30000;
       reject(error);
     });
   });
@@ -6252,6 +6260,392 @@ async function secLeadershipChartRows(symbol) {
   return { source: "myts.rs_daily.direct", latestDate, rows, latest: rows.at(-1) || null };
 }
 
+async function ensurePatternBotTables() {
+  await mysqlJson(`
+    CREATE TABLE IF NOT EXISTS ${patternBotStateTable} (
+      id VARCHAR(64) NOT NULL PRIMARY KEY,
+      status VARCHAR(32) NOT NULL DEFAULT 'PAUSED',
+      mode VARCHAR(32) NOT NULL DEFAULT 'SHADOW',
+      active_model_version VARCHAR(96) NOT NULL DEFAULT 'rules-v1',
+      active_strategy VARCHAR(96) NOT NULL DEFAULT 'RS250_PATTERN_STACK',
+      selected_symbol VARCHAR(24) NOT NULL DEFAULT 'SPY',
+      timeframe_stack_json LONGTEXT NULL,
+      kill_switch TINYINT(1) NOT NULL DEFAULT 0,
+      heartbeat_at DATETIME NULL,
+      state_json LONGTEXT NULL,
+      updated_by VARCHAR(96) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+  `);
+  await mysqlJson(`
+    CREATE TABLE IF NOT EXISTS ${patternBotCommandTable} (
+      command_id VARCHAR(96) NOT NULL PRIMARY KEY,
+      requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      requested_by VARCHAR(96) NOT NULL,
+      command_type VARCHAR(48) NOT NULL,
+      status VARCHAR(32) NOT NULL DEFAULT 'QUEUED',
+      payload_json LONGTEXT NULL,
+      result_json LONGTEXT NULL,
+      audit_reason VARCHAR(500) NULL,
+      processed_at DATETIME NULL,
+      INDEX idx_pattern_bot_commands_status (status, requested_at),
+      INDEX idx_pattern_bot_commands_type (command_type, requested_at)
+    )
+  `);
+  await mysqlJson(`
+    INSERT IGNORE INTO ${patternBotStateTable} (
+      id, status, mode, active_model_version, active_strategy, selected_symbol, timeframe_stack_json, kill_switch, heartbeat_at, state_json, updated_by
+    ) VALUES (
+      'default', 'PAUSED', 'SHADOW', 'rules-v1', 'RS250_PATTERN_STACK', 'SPY',
+      ${sqlString(JSON.stringify(["5m trigger", "1h setup", "1d bias"]))}, 0, CURRENT_TIMESTAMP,
+      ${sqlString(JSON.stringify({ sourceTruth: "rs_daily + daily_rs_cache + signals + risk", uiIndependent: true }))}, 'system'
+    )
+  `);
+}
+
+function parsePatternStateRow(raw = "") {
+  const [row] = parseRows(raw, ["id", "status", "mode", "modelVersion", "strategy", "selectedSymbol", "timeframesJson", "killSwitch", "heartbeatAt", "stateJson", "updatedBy", "updatedAt"]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    status: row.status || "PAUSED",
+    mode: row.mode || "SHADOW",
+    activeModelVersion: row.modelVersion || "rules-v1",
+    activeStrategy: row.strategy || "RS250_PATTERN_STACK",
+    selectedSymbol: String(row.selectedSymbol || "SPY").toUpperCase(),
+    timeframeStack: jsonValue(row.timeframesJson, ["5m trigger", "1h setup", "1d bias"]),
+    killSwitch: String(row.killSwitch) === "1" || row.killSwitch === true,
+    heartbeatAt: row.heartbeatAt || null,
+    state: jsonValue(row.stateJson, {}),
+    updatedBy: row.updatedBy || null,
+    updatedAt: row.updatedAt || null
+  };
+}
+
+async function patternBotState() {
+  await ensurePatternBotTables();
+  const raw = await mysqlJson(`
+    SELECT id, status, mode, active_model_version, active_strategy, selected_symbol, timeframe_stack_json, kill_switch, heartbeat_at, state_json, updated_by, updated_at
+    FROM ${patternBotStateTable}
+    WHERE id='default'
+    LIMIT 1
+  `);
+  return parsePatternStateRow(raw) || {
+    id: "default",
+    status: "PAUSED",
+    mode: "SHADOW",
+    activeModelVersion: "rules-v1",
+    activeStrategy: "RS250_PATTERN_STACK",
+    selectedSymbol: "SPY",
+    timeframeStack: ["5m trigger", "1h setup", "1d bias"],
+    killSwitch: false,
+    state: {}
+  };
+}
+
+function patternNameFor(row = {}) {
+  const brs = Number(row.brs_score);
+  const vcp = Number(row.vcp_score);
+  const rmv = Number(row.rmv);
+  const dcr = Number(row.dcr);
+  const c20 = Number(row.c20);
+  const rv20 = Number(row.rv20);
+  const offHigh = Math.abs(Number(row.pct_off_52w_high || 0));
+  if (Number.isFinite(vcp) && vcp >= 75 && Number.isFinite(rmv) && rmv <= 35) return "VCP / Flat Base";
+  if (Number.isFinite(brs) && brs >= 78 && Number.isFinite(dcr) && dcr >= 70 && Number.isFinite(rv20) && rv20 >= 1.1) return "Breakout Retest";
+  if (Number.isFinite(c20) && c20 >= 20 && offHigh <= 8) return "High Tight Flag Watch";
+  if (Number.isFinite(rmv) && rmv <= 20 && Number.isFinite(dcr) && dcr >= 55) return "Three Tight Closes";
+  if (Number.isFinite(row.cheat_entry_score) && Number(row.cheat_entry_score) >= 70) return "Pullback / Cheat Entry";
+  return "Defective Pattern / No Trade";
+}
+
+function patternDirectionFor(row = {}) {
+  const trend = Number(row.trend_score);
+  const rs = Number(row.rs_score);
+  return Number.isFinite(trend) && trend >= 80 && Number.isFinite(rs) && rs >= 80 ? "LONG" : "WAIT";
+}
+
+function patternQualityFor(row = {}) {
+  const values = [row.tqs_score, row.brs_score, row.cs_score, row.vcp_score, row.cheat_entry_score].map(Number).filter(Number.isFinite);
+  return values.length ? pct(values.reduce((sum, value) => sum + value, 0) / values.length, null) : null;
+}
+
+function patternStatusFor(row = {}) {
+  const name = patternNameFor(row);
+  const quality = Number(patternQualityFor(row));
+  const es = Number(row.es_score);
+  if (name.includes("Defective")) return "REJECTED";
+  if (Number.isFinite(es) && es >= 80) return "WAITING_EXTENSION";
+  if (Number.isFinite(quality) && quality >= 75) return "VALID";
+  if (Number.isFinite(quality) && quality >= 60) return "WEAK";
+  return "WAITING";
+}
+
+function patternCandidateFromRow(row = {}, index = 0) {
+  const close = pct(row.close, null);
+  const stop = close ? pct(close * 0.92, null) : null;
+  const pattern = patternNameFor(row);
+  const quality = patternQualityFor(row);
+  const direction = patternDirectionFor(row);
+  const status = patternStatusFor(row);
+  const expectedR = direction === "LONG" && quality ? pct(Math.max(0.6, Math.min(3.5, quality / 35)), null) : 0;
+  return {
+    rank: index + 1,
+    symbol: String(row.symbol || row.stock_symbol || "").toUpperCase(),
+    sector: row.sector || "Unknown",
+    industry: row.industry || "Unknown",
+    date: row.sdate || null,
+    price: close,
+    volume: Number(row.volume || 0),
+    rsScore: pct(row.rs_score ?? row.rs_val_3m ?? row.rs_val, null),
+    tqs: pct(row.tqs_score, null),
+    es: pct(row.es_score, null),
+    brs: pct(row.brs_score, null),
+    cs: pct(row.cs_score, null),
+    rv20: pct(row.rv20, null),
+    pattern,
+    direction,
+    confidence: quality,
+    quality,
+    expectedR,
+    status,
+    tradePlan: {
+      entryType: "Breakout or confirmed reclaim",
+      entryPrice: close,
+      stopType: "Pattern invalidation / 8% guardrail",
+      stopPrice: stop,
+      targetType: "2R initial target then trail",
+      targetPrice: close && stop ? pct(close + ((close - stop) * 2), null) : null,
+      invalidation: "Close below pattern support, failed breakout, or risk gate rejection."
+    },
+    rejectionReasons: status === "REJECTED" ? ["No high-quality reusable pattern evidence from cached daily indicators."] : []
+  };
+}
+
+function patternTimeframeStrip(candidate = {}) {
+  const biasStatus = candidate.direction === "LONG" ? "Bias Supportive" : "Bias Weak";
+  const setupStatus = candidate.status === "VALID" ? "Valid Setup" : candidate.status === "WEAK" ? "Weak Setup" : "Waiting";
+  const triggerStatus = candidate.status === "VALID" ? "Trigger Ready" : "Waiting";
+  return [
+    { timeframe: "5m", role: "trigger", pattern: candidate.pattern || "Waiting", direction: candidate.direction || "WAIT", confidence: candidate.confidence, expectedR: candidate.expectedR, status: triggerStatus, source: "control placeholder until intraday cache is enabled" },
+    { timeframe: "1h", role: "setup", pattern: candidate.pattern || "Waiting", direction: candidate.direction || "WAIT", confidence: candidate.confidence, expectedR: candidate.expectedR, status: setupStatus, source: "control placeholder until hourly cache is enabled" },
+    { timeframe: "1d", role: "bias", pattern: candidate.pattern || "Waiting", direction: candidate.direction || "WAIT", confidence: candidate.confidence, expectedR: candidate.expectedR, status: biasStatus, source: "rs_daily candle cache" }
+  ];
+}
+
+async function recentPatternCommands(limit = 10) {
+  await ensurePatternBotTables();
+  const safeLimit = clamp(Number(limit || 10), 1, 50);
+  const raw = await optionalMysqlJson(`
+    SELECT command_id, requested_at, requested_by, command_type, status, payload_json, result_json, COALESCE(audit_reason,''), COALESCE(processed_at,'')
+    FROM ${patternBotCommandTable}
+    ORDER BY requested_at DESC
+    LIMIT ${safeLimit}
+  `);
+  return parseRows(raw, ["id", "requestedAt", "requestedBy", "type", "status", "payloadJson", "resultJson", "reason", "processedAt"]).map((row) => ({
+    id: row.id,
+    requestedAt: row.requestedAt,
+    requestedBy: row.requestedBy,
+    type: row.type,
+    status: row.status,
+    payload: jsonValue(row.payloadJson, {}),
+    result: jsonValue(row.resultJson, {}),
+    reason: row.reason,
+    processedAt: row.processedAt || null
+  }));
+}
+
+async function patternCandidates(limit = 25) {
+  const cache = await dailyRsCache({ noBuild: true, reason: "pattern_bot_candidates" });
+  const rows = (cache.latestRows || [])
+    .filter((row) => Number(row.close || 0) >= 10 && Number(row.volume || 0) >= 100000)
+    .map((row) => ({ ...row, patternSort: Number(row.rs_rank || 999999) + Math.max(0, 100 - Number(row.brs_score || 0)) }))
+    .sort((a, b) => a.patternSort - b.patternSort)
+    .slice(0, clamp(Number(limit || 25), 1, 100))
+    .map(patternCandidateFromRow);
+  return { cache, rows };
+}
+
+function settledValue(result, fallback) {
+  return result && result.status === "fulfilled" ? result.value : fallback;
+}
+
+async function patternBotCockpitModel(options = {}) {
+  const [stateResult, businessDayResult, riskResult, signalsResult, tradingResult, monitorResult] = await Promise.allSettled([
+    patternBotState(),
+    marketBusinessDayStatus(),
+    riskTileModel(),
+    signalTileModel(100),
+    tradingSystemMonitorModel(),
+    marketMonitorSnapshot(options.userId || adminUsername, {})
+  ]);
+  const state = settledValue(stateResult, await patternBotState());
+  const businessDay = settledValue(businessDayResult, { isCurrent: false, latestCompleteDate: null, dueDate: null, coverageRatio: 0, message: businessDayResult.reason?.message || "Business day unavailable." });
+  const risk = settledValue(riskResult, { summary: { open_count: 0 }, guardrails: [], sell_rules: [] });
+  const signals = settledValue(signalsResult, { regimeClassification: "Unknown", quarterlySignal: "NA", dailySignal: "NA", rsDailyLatestDate: businessDay.latestCompleteDate });
+  const trading = settledValue(tradingResult, { summary: {}, production: { state: "CHECK", reasons: [tradingResult.reason?.message || "Trading monitor unavailable."] }, backtestJobs: [], activePositions: [], systemJournal: [], lifecycle: {} });
+  const monitor = settledValue(monitorResult, { health: { risk_state: signals.regimeClassification || "Unknown" }, meta: { as_of_date: businessDay.latestCompleteDate }, warning: monitorResult.reason?.message || "" });
+  let candidates = [];
+  let cacheStatus = null;
+  try {
+    const candidatePayload = await patternCandidates(options.limit || 25);
+    candidates = candidatePayload.rows;
+    cacheStatus = { latestDate: candidatePayload.cache.latestDate, startDate: candidatePayload.cache.startDate, symbolCount: candidatePayload.cache.symbolCount, rowCount: candidatePayload.cache.rowCount, status: dailyRsCacheMeta.status, store: dailyRsCacheMeta.store };
+  } catch (error) {
+    if (error.code !== "CACHE_WARMING") throw error;
+    cacheStatus = await dailyRsCacheStatus();
+  }
+  const selected = candidates.find((item) => item.symbol === state.selectedSymbol) || candidates[0] || null;
+  const openPositions = risk?.summary?.open_count ?? risk?.open_trades?.length ?? 0;
+  const production = trading.production || {};
+  const riskRejected = state.killSwitch || production.state === "LOCKED" || !businessDay.isCurrent || Number(businessDay.coverageRatio || 0) < 90;
+  const riskReasons = [
+    state.killSwitch ? "Pattern Bot kill switch is ON." : "",
+    production.state === "LOCKED" ? (production.reasons || []).join(" | ") : "",
+    !businessDay.isCurrent ? `Golden business date stale: latest ${businessDay.latestCompleteDate || "none"}, due ${businessDay.dueDate || "NA"}.` : "",
+    Number(businessDay.coverageRatio || 0) < 90 ? `OHLCV coverage ${businessDay.coverageRatio || 0}% is below 90%.` : ""
+  ].filter(Boolean);
+  return {
+    source: "mtm.pattern_bot.cockpit",
+    generatedAt: new Date().toISOString(),
+    sourceTruth: {
+      dailyCache: "mtm.daily_rs_cache",
+      candles: "rs_daily",
+      risk: "myts.risk_model",
+      signals: "actionable_trades_daily + web_vcp_scan_results + web_signal_snapshots",
+      trading: "web_backtest_runs + web_strategy_backtest_jobs + web_system_journal",
+      commands: patternBotCommandTable
+    },
+    state,
+    businessDay,
+    cache: cacheStatus,
+    market: {
+      regime: monitor?.health?.risk_state || signals.regimeClassification || "Unknown",
+      quarterlySignal: signals.quarterlySignal,
+      dailySignal: signals.dailySignal,
+      asOfDate: monitor?.meta?.as_of_date || signals.rsDailyLatestDate || businessDay.latestCompleteDate
+    },
+    shortcut: {
+      status: state.status,
+      mode: state.mode,
+      activeModelVersion: state.activeModelVersion,
+      activeStrategy: state.activeStrategy,
+      selectedSymbol: selected?.symbol || state.selectedSymbol,
+      killSwitch: state.killSwitch,
+      dataFreshness: businessDay.isCurrent ? "CURRENT" : "STALE",
+      riskStatus: riskRejected ? "RISK_REJECTED" : "RISK_APPROVED",
+      openPositions,
+      todayPnl: trading.summary?.openUnrealized ?? 0
+    },
+    selected,
+    timeframeStrip: patternTimeframeStrip(selected || {}),
+    candidates,
+    prediction: selected ? {
+      patternName: selected.pattern,
+      strategyClass: "RS250_PATTERN_STACK",
+      direction: selected.direction,
+      confidence: selected.confidence,
+      patternQuality: selected.quality,
+      expectedReturnPct: selected.expectedR ? pct(selected.expectedR * 3, null) : null,
+      expectedDrawdownPct: selected.tradePlan?.entryPrice && selected.tradePlan?.stopPrice ? pct((selected.tradePlan.stopPrice - selected.tradePlan.entryPrice) / selected.tradePlan.entryPrice * 100, null) : null,
+      expectedR: selected.expectedR,
+      holdingPeriod: "5-25 trading days",
+      noTradeProbability: selected.status === "VALID" ? 25 : selected.status === "WEAK" ? 45 : 75,
+      riskScore: riskRejected ? 100 : Math.max(0, 100 - Number(selected.quality || 0)),
+      modelVersion: state.activeModelVersion
+    } : null,
+    backtest: {
+      latestRun: trading.backtest ? { runId: trading.backtest.runId, createdAt: trading.backtest.createdAt, summary: trading.backtest.summary, notes: trading.backtest.notes } : null,
+      jobs: trading.backtestJobs || [],
+      eligible: Boolean(selected && selected.status === "VALID" && !riskRejected),
+      eligibilityRules: ["profit_factor >= 1.25", "avg_R > 0", "trade_count >= configured_minimum", "max_drawdown <= configured_limit", "recent_performance_not_broken = true"]
+    },
+    riskGate: {
+      status: riskRejected ? "RISK_REJECTED" : "RISK_APPROVED",
+      reasons: riskReasons,
+      reused: {
+        riskSettings: risk.settings || risk.inputs || {},
+        guardrails: risk.guardrails || [],
+        sellRules: risk.sell_rules || []
+      }
+    },
+    execution: {
+      rule: "UI is read-only for execution. Commands are queued and audited; bot remains headless.",
+      lifecycle: trading.lifecycle || {},
+      activePositions: trading.activePositions || []
+    },
+    journal: {
+      latest: trading.systemJournal || [],
+      reports: ["PnL by pattern", "ROI by timeframe", "Win rate by pattern", "Risk rejection reasons", "Model/version drift"]
+    },
+    commands: await recentPatternCommands(12)
+  };
+}
+
+function canIssuePatternCommand(user = {}, commandType = "") {
+  const adminOnly = new Set(["TRIGGER_KILL_SWITCH", "CLEAR_KILL_SWITCH", "SWITCH_LIVE", "CHANGE_RISK_LIMIT", "APPROVE_MODEL", "REJECT_MODEL"]);
+  if (adminOnly.has(commandType)) return user.role === "admin";
+  if (user.role === "admin") return true;
+  return user.role === "power_user" && user.subscriptionStatus === "active" && (user.appSubscriptions || []).includes("pattern-bot-cockpit");
+}
+
+async function queuePatternBotCommand(user, body = {}) {
+  await ensurePatternBotTables();
+  const type = String(body.commandType || body.type || "").trim().toUpperCase();
+  const allowed = new Set(["START_SHADOW", "START_PAPER", "PAUSE", "RESUME", "DISABLE_SYMBOL", "SEND_HUMAN_REVIEW", "TRIGGER_KILL_SWITCH", "CLEAR_KILL_SWITCH", "OPEN_LATEST_SIGNAL", "OPEN_ACTIVE_TRADE", "APPROVE_MODEL", "REJECT_MODEL", "SWITCH_LIVE"]);
+  if (!allowed.has(type)) throw new Error("Unsupported Pattern Bot command.");
+  if (!canIssuePatternCommand(user, type)) throw new Error("Pattern Bot command not allowed for this role/subscription.");
+  const commandId = `pbot-${Date.now()}-${randomBytes(4).toString("hex")}`;
+  const payload = body.payload || {};
+  const reason = String(body.reason || payload.reason || "").slice(0, 500);
+  await mysqlJson(`
+    INSERT INTO ${patternBotCommandTable} (command_id, requested_by, command_type, status, payload_json, audit_reason)
+    VALUES (${sqlString(commandId)}, ${sqlString(user.username)}, ${sqlString(type)}, 'QUEUED', ${sqlJson(payload)}, ${sqlString(reason)})
+  `);
+  const updates = [];
+  if (type === "START_SHADOW") updates.push("mode='SHADOW'", "status='RUNNING'", "kill_switch=0");
+  if (type === "START_PAPER") updates.push("mode='PAPER'", "status='RUNNING'", "kill_switch=0");
+  if (type === "SWITCH_LIVE") updates.push("mode='LIVE'", "status='RUNNING'");
+  if (type === "PAUSE") updates.push("status='PAUSED'");
+  if (type === "RESUME") updates.push("status='RUNNING'");
+  if (type === "TRIGGER_KILL_SWITCH") updates.push("kill_switch=1", "status='KILLED'");
+  if (type === "CLEAR_KILL_SWITCH") updates.push("kill_switch=0", "status='PAUSED'");
+  if (payload.symbol) updates.push(`selected_symbol=${sqlString(String(payload.symbol).toUpperCase().replace(/[^A-Z0-9.-]/g, "").slice(0, 16))}`);
+  if (updates.length) {
+    await mysqlJson(`
+      UPDATE ${patternBotStateTable}
+      SET ${updates.join(", ")}, heartbeat_at=CURRENT_TIMESTAMP, updated_by=${sqlString(user.username)}
+      WHERE id='default'
+    `);
+  }
+  await mysqlJson(`
+    UPDATE ${patternBotCommandTable}
+    SET status='ACKNOWLEDGED', processed_at=CURRENT_TIMESTAMP, result_json=${sqlJson({ stateUpdated: updates.length > 0, headlessBotMustConsumeCommand: true })}
+    WHERE command_id=${sqlString(commandId)}
+  `);
+  await persistTradingSystemJournal("pattern_bot", type, ["TRIGGER_KILL_SWITCH", "SWITCH_LIVE"].includes(type) ? "WARN" : "INFO", { commandId, payload }, [`Pattern Bot command ${type} queued through audited API.`], ["Headless bot/service must consume command table; UI must not execute strategy logic."], commandId, reason);
+  emitLiveEvent("bots", { bot: "pattern-bot", commandType: type, commandId, requestedBy: user.username });
+  return { ok: true, commandId, commandType: type, state: await patternBotState(), commands: await recentPatternCommands(12) };
+}
+
+async function handlePatternBot(request, response, url) {
+  const session = await requireSession(request, response);
+  if (!session) return;
+  if (url.pathname === "/api/pattern-bot/cockpit" && request.method === "GET") {
+    try { return json(response, 200, await patternBotCockpitModel({ userId: session.user.username, limit: url.searchParams.get("limit") })); }
+    catch (error) {
+      if (error.code === "CACHE_WARMING") return json(response, 202, { source: "mtm.pattern_bot.cockpit", warming: true, message: error.message, status: await dailyRsCacheStatus(), state: await patternBotState(), commands: await recentPatternCommands(12) });
+      return json(response, 500, { error: error.message });
+    }
+  }
+  if (url.pathname === "/api/pattern-bot/command" && request.method === "POST") {
+    try { return json(response, 200, await queuePatternBotCommand(session.user, JSON.parse(await readBody(request) || "{}"))); }
+    catch (error) { return json(response, 400, { error: error.message, state: await patternBotState(), commands: await recentPatternCommands(12) }); }
+  }
+  return json(response, 404, { error: "Not found" });
+}
+
 async function handleSecLeadership(request, response, url) {
   const session = await requireSession(request, response);
   if (!session) return;
@@ -6859,6 +7253,7 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname.startsWith("/api/home/")) return handleHome(request, response, url);
     if (url.pathname.startsWith("/api/live/")) return handleLive(request, response, url);
     if (url.pathname.startsWith("/api/bots/")) return handleBots(request, response, url);
+    if (url.pathname.startsWith("/api/pattern-bot/")) return handlePatternBot(request, response, url);
     if (url.pathname.startsWith("/api/candle-cache/")) return handleCandleCache(request, response, url);
     if (url.pathname.startsWith("/api/market-monitor/")) return handleMarketMonitor(request, response, url);
     if (url.pathname.startsWith("/api/market-cycle/")) return handleMarketCycle(request, response, url);

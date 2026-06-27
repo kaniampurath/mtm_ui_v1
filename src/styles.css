@@ -1326,3 +1326,49 @@ input, select, button { font-size: 13px; }
 .candle-cache-shell dt, .candle-cache-shell dd { margin: 0; padding: 6px; border: 1px solid var(--line); }
 .candle-cache-shell dt { color: var(--muted); border-radius: 7px 7px 0 0; border-bottom: 0; font-size: 10px; }
 .candle-cache-shell dd { border-radius: 0 0 7px 7px; font-weight: 700; }
+.pattern-bot-tile { height: 100%; min-height: 0; }
+.pattern-bot-shell { display: grid; grid-template-columns: 245px minmax(0, 1fr); gap: 10px; height: 100%; min-height: 0; color: var(--text); }
+.pattern-bot-side, .pattern-bot-main, .pattern-panel { min-height: 0; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--panel-2) 84%, black); }
+.pattern-bot-side { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 10px; padding: 10px; overflow: auto; }
+.pattern-bot-side header, .pattern-bot-top, .pattern-panel header { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
+.pattern-bot-side header span, .pattern-bot-top span, .pattern-panel header small { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; font-weight: 800; }
+.pattern-bot-side header strong, .pattern-bot-top strong { display: block; font-size: 16px; }
+.pattern-bot-side header b { min-width: 48px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; text-align: center; font-size: 12px; }
+.pattern-bot-side dl { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 5px; margin: 0; }
+.pattern-bot-side dt, .pattern-bot-side dd { margin: 0; padding: 7px; border: 1px solid color-mix(in srgb, var(--line) 72%, transparent); background: color-mix(in srgb, var(--panel) 80%, transparent); font-size: 11px; }
+.pattern-bot-side dt { color: var(--muted); border-radius: 7px 0 0 7px; }
+.pattern-bot-side dd { border-radius: 0 7px 7px 0; font-weight: 900; overflow: hidden; text-overflow: ellipsis; }
+.pattern-bot-actions { display: grid; gap: 7px; align-self: end; }
+.pattern-bot-actions button, .pattern-bot-top button { min-height: 30px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--text); font-size: 11px; font-weight: 900; cursor: pointer; }
+.pattern-bot-actions .primary { border-color: color-mix(in srgb, var(--accent) 65%, var(--line)); background: color-mix(in srgb, var(--accent) 18%, var(--panel)); }
+.pattern-bot-actions .danger { border-color: color-mix(in srgb, #ff6b6b 70%, var(--line)); background: color-mix(in srgb, #ff6b6b 18%, var(--panel)); color: #ffd4d4; }
+.pattern-bot-main { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 9px; padding: 10px; overflow: hidden; }
+.pattern-bot-top { padding: 8px 9px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--panel) 82%, transparent); }
+.pattern-mtf-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.pattern-mtf-strip article { min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--panel) 78%, transparent); }
+.pattern-mtf-strip span, .pattern-mtf-strip small, .pattern-candidate-row span, .pattern-candidate-row em { display: block; color: var(--muted); font-size: 10px; }
+.pattern-mtf-strip strong { display: block; margin: 4px 0; font-size: 13px; }
+.pattern-mtf-strip b { font-size: 10px; }
+.pattern-bot-grid { min-height: 0; overflow: auto; display: grid; grid-template-columns: 1.15fr 1fr 1fr; gap: 8px; align-content: start; }
+.pattern-panel { padding: 9px; display: grid; gap: 8px; align-content: start; }
+.pattern-panel.pattern-wide { grid-column: span 1; grid-row: span 2; }
+.pattern-panel header strong { font-size: 13px; }
+.pattern-candidate-list { display: grid; gap: 5px; max-height: 395px; overflow: auto; }
+.pattern-candidate-row { display: grid; grid-template-columns: 62px minmax(0, 1fr) 46px 92px; gap: 6px; align-items: center; min-height: 31px; padding: 5px 7px; border: 1px solid var(--line); border-radius: 7px; background: color-mix(in srgb, var(--panel) 82%, transparent); color: var(--text); text-align: left; cursor: pointer; }
+.pattern-candidate-row strong { font-size: 12px; }
+.pattern-candidate-row b { justify-self: end; font-size: 10px; }
+.pattern-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.pattern-metrics article { min-width: 0; padding: 7px; border: 1px solid color-mix(in srgb, var(--line) 72%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--panel) 78%, transparent); }
+.pattern-metrics span { display: block; color: var(--muted); font-size: 10px; }
+.pattern-metrics strong { display: block; margin-top: 3px; font-size: 12px; overflow-wrap: anywhere; }
+.pattern-risk-list, .pattern-two-col ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; }
+.pattern-risk-list li, .pattern-two-col li { padding: 6px 7px; border: 1px solid color-mix(in srgb, var(--line) 72%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--panel) 78%, transparent); font-size: 11px; }
+.pattern-risk-list strong, .pattern-risk-list span, .pattern-two-col strong, .pattern-two-col span, .pattern-two-col small { display: block; }
+.pattern-two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.tone-good { border-color: color-mix(in srgb, #4ccf7b 48%, var(--line)); }
+.tone-warn { border-color: color-mix(in srgb, #f5c94a 48%, var(--line)); }
+.tone-bad { border-color: color-mix(in srgb, #ff6b6b 52%, var(--line)); }
+.pattern-bot-side.tone-good header b, .pattern-panel.tone-good header small, .pattern-mtf-strip .tone-good b, .pattern-candidate-row.tone-good b, .pattern-risk-list .tone-good { color: #8ff0ae; }
+.pattern-bot-side.tone-warn header b, .pattern-panel.tone-warn header small, .pattern-mtf-strip .tone-warn b, .pattern-candidate-row.tone-warn b { color: #f6d978; }
+.pattern-bot-side.tone-bad header b, .pattern-panel.tone-bad header small, .pattern-mtf-strip .tone-bad b, .pattern-candidate-row.tone-bad b, .pattern-risk-list .tone-bad { color: #ff9a9a; }
+@media (max-width: 1180px) { .pattern-bot-shell { grid-template-columns: 1fr; overflow: auto; } .pattern-bot-main { overflow: visible; } .pattern-bot-grid { grid-template-columns: 1fr; overflow: visible; } .pattern-panel.pattern-wide { grid-row: auto; } .pattern-mtf-strip { grid-template-columns: 1fr; } }

@@ -1,5 +1,5 @@
 ﻿import { ContextBus, EventBus, LINK_GROUPS, MemoryDashboardRepository } from "./framework.js?v=20260531e";
-import { capabilityPlugins, categories } from "./plugins.js?v=20260626a";
+import { capabilityPlugins, categories } from "./plugins.js?v=20260627a";
 
 const GRID_COLUMNS = 24, ROW_HEIGHT = 24, MAX_WIDGETS = 20;
 const SCREENER_PAGE_SIZE = 240;
@@ -19,7 +19,7 @@ const workspaceSeeds = {
   risk: ["risk-cockpit", "market-cycle-tracker", "exposure-monitor", "drawdown-monitor", "market-breadth"],
   portfolio: ["watchlist", "performance-chart", "position-monitor", "market-brief"],
   agents: ["rs-daily-agent", "rs-data-monitor-agent", "pipeline-monitor-agent", "rs-ranking-agent", "bots-lab", "live-cache-monitor", "candle-cache"],
-  bots: ["bots-lab", "live-cache-monitor", "candle-cache", "agent-console", "research-agent", "signal-agent", "risk-agent"]
+  bots: ["pattern-bot-cockpit", "bots-lab", "live-cache-monitor", "candle-cache", "agent-console", "research-agent", "signal-agent", "risk-agent"]
 };
 const defaultPreferences = { theme: "dark", density: "comfortable", defaultWorkspaceId: "dashboard-default", defaultDashboardWorkspaceId: "dashboard-default", autoSave: true, autoRestore: true, sidebarExpanded: false, defaultRefreshInterval: 60, liveRefresh: false, confirmWorkspaceDelete: true, confirmAppRemove: true, notifications: true, widgetStyle: "standard" };
 const preferredWidgetSizes = {
@@ -38,6 +38,7 @@ const preferredWidgetSizes = {
   , "pipeline-monitor-agent": { w: 12, h: 16 }
   , "rs-data-monitor-agent": { w: 14, h: 18 }
   , "rs-ranking-agent": { w: 12, h: 16 }
+  , "pattern-bot-cockpit": { w: 24, h: 30 }
   , "bots-lab": { w: 12, h: 16 }
   , "live-cache-monitor": { w: 10, h: 12 }
   , "candle-cache": { w: 12, h: 16 }
@@ -2221,6 +2222,93 @@ return `<div class="rs-agent-shell rs-monitor-shell"><section class="rs-agent-he
     state.liveEvents = [event, ...(state.liveEvents || [])].slice(0, 18);
     eventBus.emit(type, event.payload || {});
     hydrateLiveCacheMonitorTiles(true);
+    if (type === "bots") hydratePatternBotTiles(true);
+  }
+
+  function toneForPatternStatus(value) {
+    const state = String(value || "").toUpperCase();
+    if (["VALID", "RISK_APPROVED", "CURRENT", "RUNNING", "ACKNOWLEDGED"].includes(state)) return "good";
+    if (["WEAK", "WAITING", "WAITING_EXTENSION", "SHADOW", "PAPER", "STALE"].includes(state)) return "warn";
+    if (["REJECTED", "RISK_REJECTED", "KILLED", "LIVE"].includes(state)) return "bad";
+    return "neutral";
+  }
+
+  function patternMetric(label, value, title = "") {
+    return `<article title="${e(title || label)}"><span>${e(label)}</span><strong>${e(value ?? "NA")}</strong></article>`;
+  }
+
+  function patternBotTemplate(data = {}) {
+    if (data.warming) return `<div class="pattern-bot-shell"><section class="pattern-bot-main"><div class="widget-loading">Pattern Bot cache is warming. ${e(data.message || "")}</div></section></div>`;
+    if (data.error) return `<div class="widget-error">${e(data.error)}</div>`;
+    const shortcut = data.shortcut || {};
+    const selected = data.selected || {};
+    const prediction = data.prediction || {};
+    const risk = data.riskGate || {};
+    const backtest = data.backtest || {};
+    const commandButton = (type, label, tone = "secondary", payload = {}) => `<button class="${e(tone)}" data-pattern-command="${e(type)}" data-pattern-payload="${e(JSON.stringify(payload))}" title="Writes an audited command row. The UI does not execute the bot directly.">${e(label)}</button>`;
+    const mtf = (data.timeframeStrip || []).map((item) => `<article class="tone-${toneForPatternStatus(item.status)}" title="${e(`${item.source || ""}. No lookahead: ${item.timeframe === "1d" ? "daily cache only" : "placeholder until intraday cache is enabled"}`)}"><span>${e(item.timeframe)} ${e(item.role)}</span><strong>${e(item.pattern)}</strong><small>${e(item.direction)} | ${fmtNumber(item.confidence, 1)}% | ${fmtNumber(item.expectedR, 2)}R</small><b>${e(item.status)}</b></article>`).join("");
+    const candidates = (data.candidates || []).slice(0, 18).map((item) => `<button class="pattern-candidate-row tone-${toneForPatternStatus(item.status)}" data-pattern-command="OPEN_LATEST_SIGNAL" data-pattern-payload="${e(JSON.stringify({ symbol: item.symbol }))}" title="${e(`Pattern ${item.pattern}; RS ${fmtNumber(item.rsScore, 1)}; RV20 ${fmtNumber(item.rv20, 2)}. Command is audited and does not execute a trade.`)}"><strong>${e(item.symbol)}</strong><span>${e(item.pattern)}</span><em>${fmtNumber(item.confidence, 1)}%</em><b>${e(item.status)}</b></button>`).join("");
+    const commands = (data.commands || []).map((item) => `<li title="${e(item.reason || "Audited Pattern Bot command")}"><span>${e(item.type)}</span><strong>${e(item.status)}</strong><small>${e(item.requestedBy)} | ${e(item.requestedAt || "")}</small></li>`).join("");
+    const guardrails = (risk.reused?.guardrails || []).slice(0, 5).map((item) => `<li class="tone-${e(item.tone || "neutral")}"><strong>${e(item.state || item.metric || "Guardrail")}</strong><span>${e(item.text || item.metric || "")}</span></li>`).join("");
+    const journal = (data.journal?.latest || []).slice(0, 4).map((item) => `<li><strong>${e(item.eventType || item.source)}</strong><span>${e(item.severity || "")} | ${e(item.createdAt || "")}</span></li>`).join("");
+    return `<div class="pattern-bot-shell">
+      <aside class="pattern-bot-side tone-${toneForPatternStatus(shortcut.riskStatus)}">
+        <header><div><span>Headless Pattern Bot</span><strong>${e(shortcut.status || "NA")}</strong><small>${e(shortcut.mode || "SHADOW")} | ${e(shortcut.activeModelVersion || "rules-v1")}</small></div><b>${shortcut.killSwitch ? "KILL" : "OK"}</b></header>
+        <dl>
+          <dt>Strategy</dt><dd>${e(shortcut.activeStrategy || "NA")}</dd>
+          <dt>Symbol</dt><dd>${e(shortcut.selectedSymbol || selected.symbol || "NA")}</dd>
+          <dt>Data</dt><dd>${e(shortcut.dataFreshness || "NA")}</dd>
+          <dt>Risk</dt><dd>${e(shortcut.riskStatus || "NA")}</dd>
+          <dt>Positions</dt><dd>${e(shortcut.openPositions ?? 0)}</dd>
+          <dt>Open PnL</dt><dd>${fmtNumber(shortcut.todayPnl, 2)}%</dd>
+        </dl>
+        <div class="pattern-bot-actions">
+          ${commandButton("START_PAPER", "Start Paper", "primary")}
+          ${commandButton("PAUSE", "Pause")}
+          ${commandButton("RESUME", "Resume")}
+          ${commandButton("SEND_HUMAN_REVIEW", "Human Review", "secondary", { symbol: selected.symbol })}
+          ${commandButton(shortcut.killSwitch ? "CLEAR_KILL_SWITCH" : "TRIGGER_KILL_SWITCH", shortcut.killSwitch ? "Clear Kill" : "Kill Switch", shortcut.killSwitch ? "secondary" : "danger")}
+        </div>
+      </aside>
+      <section class="pattern-bot-main">
+        <header class="pattern-bot-top"><div><span>Pattern Trading Cockpit</span><strong>${e(selected.symbol || "No Symbol")} ${selected.pattern ? `- ${e(selected.pattern)}` : ""}</strong><small>${e(data.market?.regime || "Unknown regime")} | Business day ${e(data.businessDay?.latestCompleteDate || "NA")} | Cache ${e(data.cache?.status || "NA")}</small></div><button data-refresh-pattern-bot>Refresh</button></header>
+        <section class="pattern-mtf-strip">${mtf}</section>
+        <section class="pattern-bot-grid">
+          <article class="pattern-panel pattern-wide"><header><strong>RS250 Pattern Candidates</strong><small title="Derived from existing daily RS cache, screener scores, liquidity, and no-lookahead daily indicators.">Cache read model</small></header><div class="pattern-candidate-list">${candidates || `<div class="widget-empty">No candidates from cache.</div>`}</div></article>
+          <article class="pattern-panel"><header><strong>Model Prediction</strong><small title="Rules-v1 uses existing TQS, BRS, CS, VCP, ES, RS and liquidity fields until an approved model registry version is available.">Reusable rule model</small></header><div class="pattern-metrics">${patternMetric("Direction", prediction.direction)}${patternMetric("Confidence", `${fmtNumber(prediction.confidence, 1)}%`)}${patternMetric("Expected R", `${fmtNumber(prediction.expectedR, 2)}R`)}${patternMetric("No Trade", `${fmtNumber(prediction.noTradeProbability, 0)}%`)}</div></article>
+          <article class="pattern-panel"><header><strong>Trade Plan</strong><small title="Generated only as decision support. No order can be placed without risk approval and persisted intent.">No execution from UI</small></header><div class="pattern-metrics">${patternMetric("Entry", selected.tradePlan?.entryPrice)}${patternMetric("Stop", selected.tradePlan?.stopPrice)}${patternMetric("Target", selected.tradePlan?.targetPrice)}${patternMetric("Invalidation", selected.tradePlan?.invalidation || "NA")}</div></article>
+          <article class="pattern-panel tone-${toneForPatternStatus(risk.status)}"><header><strong>Risk Gate</strong><small title="Reuses Risk Cockpit, production guardrails, golden business day, and 90% OHLCV load threshold.">${e(risk.status || "NA")}</small></header><ul class="pattern-risk-list">${(risk.reasons || []).map((item) => `<li class="tone-bad">${e(item)}</li>`).join("") || `<li class="tone-good">Risk gate currently approved from reused controls.</li>`}${guardrails}</ul></article>
+          <article class="pattern-panel"><header><strong>Backtest Edge</strong><small title="Reuses Trading System Monitor backtest runs and queued job framework.">Existing jobs</small></header><div class="pattern-metrics">${patternMetric("Eligible", backtest.eligible ? "YES" : "NO")}${patternMetric("Latest Run", backtest.latestRun?.runId || "NA")}${patternMetric("Jobs", (backtest.jobs || []).length)}${patternMetric("Rules", (backtest.eligibilityRules || []).length)}</div></article>
+          <article class="pattern-panel"><header><strong>Execution & Position</strong><small title="${e(data.execution?.rule || "UI is observability/control only.")}">Headless only</small></header><div class="pattern-metrics">${patternMetric("Lifecycle", Object.keys(data.execution?.lifecycle?.states || {}).length)}${patternMetric("Active", (data.execution?.activePositions || []).length)}${patternMetric("Command Table", data.sourceTruth?.commands)}${patternMetric("Mode", shortcut.mode)}</div></article>
+          <article class="pattern-panel pattern-wide"><header><strong>Journal & Audit</strong><small title="Commands and observations are persisted to command table and web_system_journal.">Restart safe</small></header><div class="pattern-two-col"><ul>${commands || `<li><span>No commands yet</span><strong>Ready</strong></li>`}</ul><ul>${journal || `<li><strong>No recent journal rows</strong><span>Waiting</span></li>`}</ul></div></article>
+        </section>
+      </section>
+    </div>`;
+  }
+
+  async function hydratePatternBotTiles(silent = false) {
+    const tiles = [...root.querySelectorAll("[data-pattern-bot]")];
+    if (!tiles.length) return;
+    for (const tile of tiles) {
+      try {
+        const data = await api(`/api/pattern-bot/cockpit?limit=25&ts=${Date.now()}`, null, "GET");
+        tile.innerHTML = patternBotTemplate(data);
+        tile.querySelector("[data-refresh-pattern-bot]")?.addEventListener("click", () => hydratePatternBotTiles(true));
+        tile.querySelectorAll("[data-pattern-command]").forEach((button) => button.addEventListener("click", () => runPatternBotCommand(button, tile)));
+      } catch (error) {
+        if (!silent) tile.innerHTML = `<div class="widget-error">${e(error.message)}</div>`;
+      }
+    }
+  }
+
+  async function runPatternBotCommand(button, tile) {
+    button.disabled = true;
+    const commandType = button.dataset.patternCommand;
+    let payload = {};
+    try { payload = JSON.parse(button.dataset.patternPayload || "{}"); } catch {}
+    const result = await api("/api/pattern-bot/command", { commandType, payload, reason: `Pattern Bot UI command ${commandType}` });
+    if (result.error) tile.insertAdjacentHTML("beforeend", `<div class="signals-live-error">${e(result.error)}</div>`);
+    await hydratePatternBotTiles(true);
   }
 
   function botTone(bot) {
@@ -2305,14 +2393,14 @@ return `<div class="rs-agent-shell rs-monitor-shell"><section class="rs-agent-he
   }
 
   function bindWidgetEvents() {
-    hydrateScreenerTiles(); hydrateMarketMonitorTiles(); hydrateMarketCycleTiles(); hydrateMarketCockpitTiles(); hydrateGroupCockpitTiles(); hydrateLeadersCockpitTiles(); hydrateMinerviniScreenTiles(); hydrateSignalsCockpitTiles(); hydrateWatchlistTiles(); hydrateRiskCockpitTiles(); hydrateTradingSystemMonitorTiles(); hydrateRsAgentTiles(); hydrateRsDataMonitorTiles(); hydratePipelineAgentTiles(); hydrateRsRankingTiles(); hydrateBotsLabTiles(); hydrateLiveCacheMonitorTiles(); hydrateCandleCacheTiles(); hydrateDailyReportTiles(); hydrateReasoningImagesTiles();
+    hydrateScreenerTiles(); hydrateMarketMonitorTiles(); hydrateMarketCycleTiles(); hydrateMarketCockpitTiles(); hydrateGroupCockpitTiles(); hydrateLeadersCockpitTiles(); hydrateMinerviniScreenTiles(); hydrateSignalsCockpitTiles(); hydrateWatchlistTiles(); hydrateRiskCockpitTiles(); hydrateTradingSystemMonitorTiles(); hydrateRsAgentTiles(); hydrateRsDataMonitorTiles(); hydratePipelineAgentTiles(); hydrateRsRankingTiles(); hydratePatternBotTiles(); hydrateBotsLabTiles(); hydrateLiveCacheMonitorTiles(); hydrateCandleCacheTiles(); hydrateDailyReportTiles(); hydrateReasoningImagesTiles();
     root.querySelectorAll(".widget-card").forEach((card) => { const w = currentWorkspace().widgets.find((item) => item.id === card.dataset.widgetId); if (!w) return; card.querySelector(".drag-handle")?.addEventListener("pointerdown", (ev) => startDrag(ev, w)); card.querySelector(".resize-handle")?.addEventListener("pointerdown", (ev) => startResize(ev, w)); card.querySelector("[data-widget-menu]")?.addEventListener("click", () => { const m = card.querySelector(".widget-menu"); m.hidden = !m.hidden; }); card.querySelector("[data-refresh-signals-live]")?.addEventListener("click", (ev) => refreshSignalsLive(ev.currentTarget)); card.querySelector("[data-risk-settings]")?.addEventListener("submit", saveRiskSettings); card.querySelector("[data-link-group]")?.addEventListener("change", (ev) => { w.linkGroup = ev.target.value; renderWidgets(); persistAll(); }); card.querySelectorAll("[data-symbol]").forEach((b) => b.addEventListener("click", () => { contextBus.update(w.linkGroup, { symbol: b.dataset.symbol }, w.id); eventBus.emit("symbol_selected", { symbol: b.dataset.symbol, link_group: w.linkGroup }); })); card.querySelectorAll("[data-action]").forEach((b) => b.addEventListener("click", () => runWidgetAction(b.dataset.action, w))); });
     if (!timers.has("__signals_cache__")) timers.set("__signals_cache__", window.setInterval(reloadSignalsCockpitTilesFromCache, 30000));
     if (!timers.has("__watchlist_cache__")) timers.set("__watchlist_cache__", window.setInterval(() => {
       hydrateWatchlistTiles(true);
       if (state.screenerView.autoRefresh) hydrateScreenerTiles(true);
     }, 30000));
-    if (!timers.has("__rs_agent__")) timers.set("__rs_agent__", window.setInterval(() => { hydrateRsAgentTiles(true); hydrateRsDataMonitorTiles(true); hydratePipelineAgentTiles(true); pollMinerviniScreenTiles(); hydrateBotsLabTiles(true); hydrateLiveCacheMonitorTiles(true); hydrateCandleCacheTiles(true); }, 10000));
+    if (!timers.has("__rs_agent__")) timers.set("__rs_agent__", window.setInterval(() => { hydrateRsAgentTiles(true); hydrateRsDataMonitorTiles(true); hydratePipelineAgentTiles(true); pollMinerviniScreenTiles(); hydratePatternBotTiles(true); hydrateBotsLabTiles(true); hydrateLiveCacheMonitorTiles(true); hydrateCandleCacheTiles(true); }, 10000));
   }
   function runWidgetAction(action, w) {
     const ws = currentWorkspace(), p = pluginById.get(w.pluginId);
@@ -2421,6 +2509,7 @@ return `<div class="rs-agent-shell rs-monitor-shell"><section class="rs-agent-he
       if (w.type === "trading" && canLaunchApp("trading-system-monitor")) alignTradingWorkspace(w);
       if (w.type === "risk" && canLaunchApp("risk-cockpit")) alignRiskWorkspace(w);
       if (w.type === "agents" && canLaunchApp("rs-daily-agent")) alignAgentsWorkspace(w);
+      if (w.type === "bots" && canLaunchApp("pattern-bot-cockpit")) alignBotsWorkspace(w);
     }
   }
   function alignScreenerOnlyWorkspace(w) {
@@ -2508,6 +2597,28 @@ return `<div class="rs-agent-shell rs-monitor-shell"><section class="rs-agent-he
       widget.w = Math.min(Math.max(widget.w || 6, 5), 10);
       y += Math.max(widget.h || 7, 7) + 1;
       if (y > 22) { x = 0; y = 19; }
+    }
+  }
+  function alignBotsWorkspace(w) {
+    let patternWidget = w.widgets.find((widget) => widget.pluginId === "pattern-bot-cockpit");
+    if (!patternWidget) {
+      patternWidget = createWidget(pluginById.get("pattern-bot-cockpit"), { x: 0, y: 0 });
+      w.widgets.unshift(patternWidget);
+    }
+    Object.assign(patternWidget, { x: 0, y: 0, w: 24, h: 30, minimized: false, maximized: true, restoreBounds: { x: 0, y: 0, w: 24, h: 30 } });
+    const supporting = ["bots-lab", "live-cache-monitor", "candle-cache"];
+    let y = 31;
+    for (const pluginId of supporting) {
+      if (!w.widgets.some((widget) => widget.pluginId === pluginId) && pluginById.has(pluginId) && canLaunchApp(pluginId)) {
+        w.widgets.push(createWidget(pluginById.get(pluginId), { x: 0, y }));
+      }
+    }
+    for (const widget of w.widgets.filter((item) => item.id !== patternWidget.id)) {
+      widget.x = widget.pluginId === "candle-cache" ? 12 : 0;
+      widget.y = y;
+      widget.w = widget.pluginId === "live-cache-monitor" ? 10 : 12;
+      widget.h = Math.max(widget.h || 10, 12);
+      if (widget.pluginId !== "candle-cache") y += widget.h + 1;
     }
   }
   function workspaceNameForNav(item) {
