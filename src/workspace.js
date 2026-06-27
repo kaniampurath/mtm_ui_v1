@@ -2238,7 +2238,7 @@ return `<div class="rs-agent-shell rs-monitor-shell"><section class="rs-agent-he
   }
 
   function patternBotTemplate(data = {}) {
-    if (data.warming) return `<div class="pattern-bot-shell"><section class="pattern-bot-main"><div class="widget-loading">Pattern Bot cache is warming. ${e(data.message || "")}</div></section></div>`;
+    if (data.warming) return `<div class="pattern-bot-shell simplified"><section class="pattern-bot-main"><div class="pattern-bot-empty"><strong>Preparing Pattern Bot</strong><span>${e(data.message || "Daily cache is warming. The bot remains headless and no state is lost.")}</span><div class="cache-progress-track"><span style="--w:45%"></span></div></div></section></div>`;
     if (data.error) return `<div class="widget-error">${e(data.error)}</div>`;
     const shortcut = data.shortcut || {};
     const selected = data.selected || {};
@@ -2246,41 +2246,53 @@ return `<div class="rs-agent-shell rs-monitor-shell"><section class="rs-agent-he
     const risk = data.riskGate || {};
     const backtest = data.backtest || {};
     const commandButton = (type, label, tone = "secondary", payload = {}) => `<button class="${e(tone)}" data-pattern-command="${e(type)}" data-pattern-payload="${e(JSON.stringify(payload))}" title="Writes an audited command row. The UI does not execute the bot directly.">${e(label)}</button>`;
-    const mtf = (data.timeframeStrip || []).map((item) => `<article class="tone-${toneForPatternStatus(item.status)}" title="${e(`${item.source || ""}. No lookahead: ${item.timeframe === "1d" ? "daily cache only" : "placeholder until intraday cache is enabled"}`)}"><span>${e(item.timeframe)} ${e(item.role)}</span><strong>${e(item.pattern)}</strong><small>${e(item.direction)} | ${fmtNumber(item.confidence, 1)}% | ${fmtNumber(item.expectedR, 2)}R</small><b>${e(item.status)}</b></article>`).join("");
-    const candidates = (data.candidates || []).slice(0, 18).map((item) => `<button class="pattern-candidate-row tone-${toneForPatternStatus(item.status)}" data-pattern-command="OPEN_LATEST_SIGNAL" data-pattern-payload="${e(JSON.stringify({ symbol: item.symbol }))}" title="${e(`Pattern ${item.pattern}; RS ${fmtNumber(item.rsScore, 1)}; RV20 ${fmtNumber(item.rv20, 2)}. Command is audited and does not execute a trade.`)}"><strong>${e(item.symbol)}</strong><span>${e(item.pattern)}</span><em>${fmtNumber(item.confidence, 1)}%</em><b>${e(item.status)}</b></button>`).join("");
+    const riskTone = toneForPatternStatus(shortcut.riskStatus);
+    const actionTip = risk.status === "RISK_APPROVED" ? "Review setup and use Paper mode before any live workflow." : "Resolve red blockers before treating any pattern as tradeable.";
+    const mtf = (data.timeframeStrip || []).map((item) => `<article class="tone-${toneForPatternStatus(item.status)}"><header><span>${e(item.timeframe)}</span><b>${e(item.role)}</b></header><strong>${e(item.pattern)}</strong><small>${e(item.direction)} | ${fmtNumber(item.confidence, 1)}% confidence | ${fmtNumber(item.expectedR, 2)}R</small><em title="${e(`${item.source || ""}. No lookahead: ${item.timeframe === "1d" ? "daily cache only" : "placeholder until intraday cache is enabled"}`)}">${e(item.status)}</em></article>`).join("");
+    const candidates = (data.candidates || []).slice(0, 12).map((item) => `<button class="pattern-candidate-row tone-${toneForPatternStatus(item.status)}" data-pattern-command="OPEN_LATEST_SIGNAL" data-pattern-payload="${e(JSON.stringify({ symbol: item.symbol }))}" title="${e(`Audit-only open signal action. Pattern ${item.pattern}; RS ${fmtNumber(item.rsScore, 1)}; RV20 ${fmtNumber(item.rv20, 2)}.`)}"><strong>${e(item.symbol)}</strong><span>${e(item.pattern)}</span><em>${fmtNumber(item.confidence, 0)}%</em><b>${e(item.status).replace("WAITING_", "")}</b></button>`).join("");
     const commands = (data.commands || []).map((item) => `<li title="${e(item.reason || "Audited Pattern Bot command")}"><span>${e(item.type)}</span><strong>${e(item.status)}</strong><small>${e(item.requestedBy)} | ${e(item.requestedAt || "")}</small></li>`).join("");
-    const guardrails = (risk.reused?.guardrails || []).slice(0, 5).map((item) => `<li class="tone-${e(item.tone || "neutral")}"><strong>${e(item.state || item.metric || "Guardrail")}</strong><span>${e(item.text || item.metric || "")}</span></li>`).join("");
+    const guardrails = (risk.reused?.guardrails || []).slice(0, 4).map((item) => `<li class="tone-${e(item.tone || "neutral")}"><strong>${e(item.state || item.metric || "Guardrail")}</strong><span>${e(item.text || item.metric || "")}</span></li>`).join("");
     const journal = (data.journal?.latest || []).slice(0, 4).map((item) => `<li><strong>${e(item.eventType || item.source)}</strong><span>${e(item.severity || "")} | ${e(item.createdAt || "")}</span></li>`).join("");
-    return `<div class="pattern-bot-shell">
+    const blockers = (risk.reasons || []).slice(0, 4);
+    const quickTips = [
+      ["Headless", "Buttons queue commands; trading logic stays outside UI."],
+      ["No Lookahead", "Daily cards use completed cached OHLCV only."],
+      ["Risk First", "A setup is not tradeable until the risk gate is green."]
+    ].map(([label, tip]) => `<li title="${e(tip)}"><b>${e(label)}</b><span>${e(tip)}</span></li>`).join("");
+    return `<div class="pattern-bot-shell simplified">
       <aside class="pattern-bot-side tone-${toneForPatternStatus(shortcut.riskStatus)}">
-        <header><div><span>Headless Pattern Bot</span><strong>${e(shortcut.status || "NA")}</strong><small>${e(shortcut.mode || "SHADOW")} | ${e(shortcut.activeModelVersion || "rules-v1")}</small></div><b>${shortcut.killSwitch ? "KILL" : "OK"}</b></header>
+        <header><div><span>Pattern Bot</span><strong>${e(shortcut.mode || "SHADOW")}</strong><small>${e(shortcut.status || "NA")} | ${e(shortcut.activeModelVersion || "rules-v1")}</small></div><b>${shortcut.killSwitch ? "KILL" : "SAFE"}</b></header>
+        <section class="pattern-decision-card tone-${riskTone}"><span>Can bot act?</span><strong>${e(shortcut.riskStatus || "NA")}</strong><small>${e(actionTip)}</small></section>
         <dl>
-          <dt>Strategy</dt><dd>${e(shortcut.activeStrategy || "NA")}</dd>
           <dt>Symbol</dt><dd>${e(shortcut.selectedSymbol || selected.symbol || "NA")}</dd>
           <dt>Data</dt><dd>${e(shortcut.dataFreshness || "NA")}</dd>
-          <dt>Risk</dt><dd>${e(shortcut.riskStatus || "NA")}</dd>
           <dt>Positions</dt><dd>${e(shortcut.openPositions ?? 0)}</dd>
           <dt>Open PnL</dt><dd>${fmtNumber(shortcut.todayPnl, 2)}%</dd>
         </dl>
+        <ul class="pattern-tip-list">${quickTips}</ul>
         <div class="pattern-bot-actions">
           ${commandButton("START_PAPER", "Start Paper", "primary")}
           ${commandButton("PAUSE", "Pause")}
           ${commandButton("RESUME", "Resume")}
-          ${commandButton("SEND_HUMAN_REVIEW", "Human Review", "secondary", { symbol: selected.symbol })}
+          ${commandButton("SEND_HUMAN_REVIEW", "Send Review", "secondary", { symbol: selected.symbol })}
           ${commandButton(shortcut.killSwitch ? "CLEAR_KILL_SWITCH" : "TRIGGER_KILL_SWITCH", shortcut.killSwitch ? "Clear Kill" : "Kill Switch", shortcut.killSwitch ? "secondary" : "danger")}
         </div>
       </aside>
       <section class="pattern-bot-main">
-        <header class="pattern-bot-top"><div><span>Pattern Trading Cockpit</span><strong>${e(selected.symbol || "No Symbol")} ${selected.pattern ? `- ${e(selected.pattern)}` : ""}</strong><small>${e(data.market?.regime || "Unknown regime")} | Business day ${e(data.businessDay?.latestCompleteDate || "NA")} | Cache ${e(data.cache?.status || "NA")}</small></div><button data-refresh-pattern-bot>Refresh</button></header>
+        <header class="pattern-bot-top"><div><span>Bot Dashboard</span><strong>${e(selected.symbol || "No Symbol")} ${selected.pattern ? `- ${e(selected.pattern)}` : ""}</strong><small>${e(data.market?.regime || "Unknown regime")} | Business day ${e(data.businessDay?.latestCompleteDate || "NA")} | Cache ${e(data.cache?.status || "NA")}</small></div><button data-refresh-pattern-bot title="Reload cockpit from DB/cache">Refresh</button></header>
+        <section class="pattern-summary-row">
+          ${patternMetric("Pattern", selected.pattern || "No setup", "Current best pattern candidate from reused RS cache.")}
+          ${patternMetric("Confidence", `${fmtNumber(prediction.confidence, 0)}%`, "Model/rule confidence from current decision-support scores.")}
+          ${patternMetric("Expected R", `${fmtNumber(prediction.expectedR, 2)}R`, "Estimated reward-to-risk from generated trade plan.")}
+          ${patternMetric("No Trade", `${fmtNumber(prediction.noTradeProbability, 0)}%`, "Higher means setup should stay on watch or be rejected.")}
+        </section>
         <section class="pattern-mtf-strip">${mtf}</section>
         <section class="pattern-bot-grid">
-          <article class="pattern-panel pattern-wide"><header><strong>RS250 Pattern Candidates</strong><small title="Derived from existing daily RS cache, screener scores, liquidity, and no-lookahead daily indicators.">Cache read model</small></header><div class="pattern-candidate-list">${candidates || `<div class="widget-empty">No candidates from cache.</div>`}</div></article>
-          <article class="pattern-panel"><header><strong>Model Prediction</strong><small title="Rules-v1 uses existing TQS, BRS, CS, VCP, ES, RS and liquidity fields until an approved model registry version is available.">Reusable rule model</small></header><div class="pattern-metrics">${patternMetric("Direction", prediction.direction)}${patternMetric("Confidence", `${fmtNumber(prediction.confidence, 1)}%`)}${patternMetric("Expected R", `${fmtNumber(prediction.expectedR, 2)}R`)}${patternMetric("No Trade", `${fmtNumber(prediction.noTradeProbability, 0)}%`)}</div></article>
-          <article class="pattern-panel"><header><strong>Trade Plan</strong><small title="Generated only as decision support. No order can be placed without risk approval and persisted intent.">No execution from UI</small></header><div class="pattern-metrics">${patternMetric("Entry", selected.tradePlan?.entryPrice)}${patternMetric("Stop", selected.tradePlan?.stopPrice)}${patternMetric("Target", selected.tradePlan?.targetPrice)}${patternMetric("Invalidation", selected.tradePlan?.invalidation || "NA")}</div></article>
-          <article class="pattern-panel tone-${toneForPatternStatus(risk.status)}"><header><strong>Risk Gate</strong><small title="Reuses Risk Cockpit, production guardrails, golden business day, and 90% OHLCV load threshold.">${e(risk.status || "NA")}</small></header><ul class="pattern-risk-list">${(risk.reasons || []).map((item) => `<li class="tone-bad">${e(item)}</li>`).join("") || `<li class="tone-good">Risk gate currently approved from reused controls.</li>`}${guardrails}</ul></article>
-          <article class="pattern-panel"><header><strong>Backtest Edge</strong><small title="Reuses Trading System Monitor backtest runs and queued job framework.">Existing jobs</small></header><div class="pattern-metrics">${patternMetric("Eligible", backtest.eligible ? "YES" : "NO")}${patternMetric("Latest Run", backtest.latestRun?.runId || "NA")}${patternMetric("Jobs", (backtest.jobs || []).length)}${patternMetric("Rules", (backtest.eligibilityRules || []).length)}</div></article>
-          <article class="pattern-panel"><header><strong>Execution & Position</strong><small title="${e(data.execution?.rule || "UI is observability/control only.")}">Headless only</small></header><div class="pattern-metrics">${patternMetric("Lifecycle", Object.keys(data.execution?.lifecycle?.states || {}).length)}${patternMetric("Active", (data.execution?.activePositions || []).length)}${patternMetric("Command Table", data.sourceTruth?.commands)}${patternMetric("Mode", shortcut.mode)}</div></article>
-          <article class="pattern-panel pattern-wide"><header><strong>Journal & Audit</strong><small title="Commands and observations are persisted to command table and web_system_journal.">Restart safe</small></header><div class="pattern-two-col"><ul>${commands || `<li><span>No commands yet</span><strong>Ready</strong></li>`}</ul><ul>${journal || `<li><strong>No recent journal rows</strong><span>Waiting</span></li>`}</ul></div></article>
+          <article class="pattern-panel pattern-wide"><header><strong>Best Candidates</strong><small title="Derived from existing daily RS cache, screener scores, liquidity, and no-lookahead daily indicators.">RS cache</small></header><div class="pattern-candidate-list">${candidates || `<div class="widget-empty">No candidates from cache.</div>`}</div></article>
+          <article class="pattern-panel"><header><strong>Trade Plan</strong><small title="Decision support only. No order can be placed from this UI.">Watch only</small></header><div class="pattern-metrics">${patternMetric("Entry", selected.tradePlan?.entryPrice)}${patternMetric("Stop", selected.tradePlan?.stopPrice)}${patternMetric("Target", selected.tradePlan?.targetPrice)}${patternMetric("Invalidation", selected.tradePlan?.invalidation || "NA")}</div></article>
+          <article class="pattern-panel tone-${toneForPatternStatus(risk.status)}"><header><strong>Blockers</strong><small title="Reuses Risk Cockpit, production guardrails, golden business day, and 90% OHLCV load threshold.">${e(risk.status || "NA")}</small></header><ul class="pattern-risk-list">${blockers.map((item) => `<li class="tone-bad">${e(item)}</li>`).join("") || `<li class="tone-good">No active blockers from reused controls.</li>`}${guardrails}</ul></article>
+          <article class="pattern-panel"><header><strong>Evidence</strong><small title="Reuses Trading System Monitor backtest jobs and signal lifecycle.">Reuse</small></header><div class="pattern-metrics">${patternMetric("Backtest OK", backtest.eligible ? "YES" : "NO")}${patternMetric("Jobs", (backtest.jobs || []).length)}${patternMetric("Active", (data.execution?.activePositions || []).length)}${patternMetric("Mode", shortcut.mode)}</div></article>
+          <article class="pattern-panel pattern-wide"><header><strong>Audit Trail</strong><small title="Commands are persisted to pattern_bot_commands and summarized in web_system_journal.">Restart safe</small></header><div class="pattern-two-col"><ul>${commands || `<li><span>No commands yet</span><strong>Ready</strong></li>`}</ul><ul>${journal || `<li><strong>No recent journal rows</strong><span>Waiting</span></li>`}</ul></div></article>
         </section>
       </section>
     </div>`;
